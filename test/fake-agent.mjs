@@ -113,6 +113,10 @@ async function handlePrompt(message) {
 	}
 	if (text.includes("AUTH")) return replyError(message.id, -32000, "Authentication required");
 	if (text.includes("RPCERROR")) return replyError(message.id, -32603, "fake rpc failure");
+	if (text === "CWD" || (process.env.FAKE_CWD === "1" && text.endsWith("\n\nCWD"))) {
+		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.cwd() } });
+		return turn.finish("end_turn");
+	}
 	if (text.startsWith("ECHO ")) {
 		await sleep(150);
 		if (turn.finished) return;
