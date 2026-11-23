@@ -519,11 +519,13 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		}
 		activeClients.add(acp);
 		const tools = getCurrentTools(context.messages);
-		let bridge: McpBridge | undefined;
+		let bridge: McpBridge | undefined = piSessionId ? sessionBridges.get(piSessionId) : undefined;
 		if (tools.length > 0) {
-			bridge = piSessionId ? (sessionBridges.get(piSessionId) ?? new McpBridge()) : new McpBridge();
+			bridge ??= new McpBridge();
 			if (piSessionId) sessionBridges.set(piSessionId, bridge);
 			bridge.setTools(tools);
+		} else if (bridge) {
+			bridge.setTools([]);
 		}
 		let handoff: ToolHandoff | undefined;
 		let handedOffToDrive = false;

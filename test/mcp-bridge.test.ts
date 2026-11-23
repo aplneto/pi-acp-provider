@@ -212,3 +212,28 @@ test("ACP crash mid-MCP tool call surfaces error and next prompt recovers", asyn
 		handle.dispose();
 	}
 });
+
+test("bridged calls obey the session Pi tool allowlist across turns", async () => {
+	const handle = makeProvider();
+	let writes = 0;
+	const readTool: AgentTool<any> = {
+		name: "read_only",
+		label: "Read",
+		description: "Read-only tool",
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+	};
+	const agent = makeAgent(handle, "mcp-restrict", [readTool]);
+	try {
+		await agent.prompt("MCP write_file {}");
+		assert.equal(writes, 0);
+		assert.equal(assistantText(agent), "mcp:true:Tool 'write_file' is not available in this Pi session.");
+
+		// Removing all tools on a later turn also removes them from the session's McpBridge.
+		agent.state.tools = [];
+		await agent.prompt("MCP read_only {}");
+		assert.equal(assistantText(agent), "mcp:true:Tool 'read_only' is not available in this Pi session.");
+	} finally {
+		handle.dispose();
+	}
+});

@@ -41,7 +41,7 @@ export type AcpSettings = Partial<{
 }>;
 
 const DEFAULTS = {
-	autoApproveTools: true,
+	autoApproveTools: false,
 	handshakeTimeoutMs: 30_000,
 } as const;
 

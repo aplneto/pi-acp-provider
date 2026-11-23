@@ -45,7 +45,7 @@ Declare agents under `acp.agents` in `~/.pi/agent/settings.json` (or
 ```json
 {
   "acp": {
-    "autoApproveTools": true,
+    "autoApproveTools": false,
     "agents": {
       "copilot": { "name": "GitHub Copilot", "command": "copilot", "args": ["--acp"] },
       "gemini": { "name": "Gemini", "command": "gemini", "args": ["--experimental-acp"] }
@@ -96,7 +96,7 @@ Global keys:
 
 | Key | Env override | Default | Meaning |
 |---|---|---|---|
-| `autoApproveTools` | `ACP_AUTO_APPROVE` | `true` | When `false`, each permission request opens a select dialog (TUI/RPC) or is denied (print/JSON mode). |
+| `autoApproveTools` | `ACP_AUTO_APPROVE` | `false` | When `false` (default), each permission request opens a select dialog (TUI/RPC) or is denied (background/print/JSON mode). Set `true` to auto-approve (`allow_once`). |
 | `handshakeTimeoutMs` | | `30000` | Milliseconds to wait for `initialize`, `session/new`, and model or thinking-level changes. |
 | | `ACP_DEBUG=1` | off | Wire diagnostics on stderr. |
 
@@ -132,9 +132,11 @@ Global keys:
   with `cancelled` and leaves the session usable. The next prompt waits (up to
   5 s) for the agent to confirm the cancellation, so late updates can't leak
   into it.
-- **Permissions**: `session/request_permission` is auto-approved by default
-  (`allow_once`, never `allow_always`). Set `autoApproveTools: false` to get an
-  interactive select dialog that names the asking agent.
+- **Permissions**: `session/request_permission` prompts via an interactive
+  select dialog that names the asking agent when a UI is available, and denies
+  (`reject_once`) in non-interactive/background sessions. Set
+  `autoApproveTools: true` (or `ACP_AUTO_APPROVE=1`) to auto-approve with
+  `allow_once` (never `allow_always`).
 - **Auth**: when an agent answers `session/new` with ACP `auth_required`
   (code -32000), the provider calls `authenticate` with the agent's configured
   `authMethod` and retries once. Without one, the error lists the auth methods

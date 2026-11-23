@@ -5,7 +5,7 @@ import { parseSettings, resolveConfig } from "../src/config.ts";
 test("defaults apply when nothing is configured", () => {
 	assert.deepEqual(resolveConfig({ settings: {}, env: {} }), {
 		agents: [],
-		autoApproveTools: true,
+		autoApproveTools: false,
 		handshakeTimeoutMs: 30_000,
 		debug: false,
 	});

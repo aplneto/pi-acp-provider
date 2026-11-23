@@ -163,3 +163,52 @@ test("session_shutdown with sessionManager disposes only the ended session", () 
 			}
 		},
 	));
+
+test("interactive and background sessions enforce explicit permissions by default", () =>
+	withSettings(
+		{ acp: { agents: { fake: { command: process.execPath, args: [fileURLToPath(new URL("./fake-agent.mjs", import.meta.url))] } } } },
+		async () => {
+			const { pi, providers, handlers } = makeFakePi();
+			acpExtension(pi);
+			const provider = providers[0] as {
+				getModels: () => { id: string }[];
+				streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<{ stopReason: string; content: { type: string; text: string }[] }> };
+			};
+			const { normalizeContext } = await import("@earendil-works/pi-ai/utils/transcript");
+			const model = provider.getModels()[0];
+			const prompt = normalizeContext({ messages: [{ role: "user", content: "PERMISSION", timestamp: Date.now() }] });
+
+			const prompts: string[] = [];
+			const interactiveCtx = {
+				cwd: "/tmp",
+				hasUI: true,
+				sessionManager: { getSessionId: () => "interactive-perm" },
+				ui: {
+					notify: () => {},
+					select: async (title: string) => {
+						prompts.push(title);
+						return "Allow";
+					},
+				},
+			};
+			const backgroundCtx = {
+				cwd: "/tmp",
+				hasUI: false,
+				sessionManager: { getSessionId: () => "background-perm" },
+			};
+			handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, interactiveCtx);
+			handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, backgroundCtx);
+
+			const [interactiveRes, backgroundRes] = await Promise.all([
+				provider.streamSimple(model, prompt, { sessionId: "interactive-perm" }).result(),
+				provider.streamSimple(model, prompt, { sessionId: "background-perm" }).result(),
+			]);
+			assert.equal(prompts.length, 1);
+			assert.match(prompts[0] ?? "", /fake permission: rm -rf build/);
+			assert.match(interactiveRes.content.map((b) => b.text).join(""), /\[approved=allow\]/);
+			assert.match(backgroundRes.content.map((b) => b.text).join(""), /\[approved=deny\]/);
+
+			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, interactiveCtx);
+			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, backgroundCtx);
+		},
+	));
