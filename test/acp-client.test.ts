@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
 import { AcpClient, AcpRpcError, type AcpClientOptions, type ServerRequestHandler } from "../src/acp-client.ts";
-import { autoApprove, parsePermissionRequest, parseRpcMessage, type AcpSessionUpdate } from "../src/acp.ts";
+import { autoApprove, parseInitializeResult, parsePermissionRequest, parseRpcMessage, type AcpSessionUpdate } from "../src/acp.ts";
 
 const fakePath = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
 
@@ -55,6 +55,12 @@ test("initialize handshake reaches ready", async () => {
 	assert.equal(client.state, "ready");
 	assert.match(info.name, /^fake-agent-/);
 	assert.deepEqual(info.authMethods, [{ id: "fake-login", name: "Fake login", description: "Pretend to sign in" }]);
+});
+
+test("system prompt capability requires an advertised capability object", () => {
+	assert.equal(parseInitializeResult({ agentCapabilities: { sessionCapabilities: { systemPrompt: {} } } }).supportsSystemPrompt, true);
+	assert.equal(parseInitializeResult({ agentCapabilities: { sessionCapabilities: { systemPrompt: null } } }).supportsSystemPrompt, false);
+	assert.equal(parseInitializeResult({ agentCapabilities: {} }).supportsSystemPrompt, false);
 });
 
 test("session is created once and reused", async () => {

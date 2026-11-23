@@ -219,6 +219,8 @@ export interface AcpAgentInfo {
 	version: string;
 	/** Methods the client may pass to `authenticate` when the agent reports `auth_required`. */
 	authMethods: AcpAuthMethod[];
+	/** Whether the agent advertises client-provided session system prompts. */
+	supportsSystemPrompt: boolean;
 }
 
 function parseAuthMethods(value: unknown): AcpAuthMethod[] {
@@ -233,11 +235,14 @@ function parseAuthMethods(value: unknown): AcpAuthMethod[] {
 export function parseInitializeResult(result: unknown): AcpAgentInfo {
 	const record = isRecord(result) ? result : {};
 	const info = isRecord(record.agentInfo) ? record.agentInfo : {};
+	const capabilities = isRecord(record.agentCapabilities) ? record.agentCapabilities : {};
+	const sessionCapabilities = isRecord(capabilities.sessionCapabilities) ? capabilities.sessionCapabilities : {};
 	return {
 		protocolVersion: typeof record.protocolVersion === "number" ? record.protocolVersion : ACP_PROTOCOL_VERSION,
 		name: optionalString(info.name) ?? "unknown-agent",
 		version: optionalString(info.version) ?? "0.0.0",
 		authMethods: parseAuthMethods(record.authMethods),
+		supportsSystemPrompt: isRecord(sessionCapabilities.systemPrompt),
 	};
 }
 
