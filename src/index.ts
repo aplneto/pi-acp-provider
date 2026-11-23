@@ -16,9 +16,9 @@ import { ACP_PROVIDER_ID, createAcpProvider, type PermissionPolicy } from "./pro
 type PermissionUi = Pick<ExtensionUIContext, "select">;
 
 /** Asks the user via a select dialog; denies when no dialog-capable UI exists. */
-function interactivePolicy(getUi: () => PermissionUi | undefined): PermissionPolicy {
-	return async (request, { agent, signal }) => {
-		const ui = getUi();
+function interactivePolicy(getUi: (sessionId?: string) => PermissionUi | undefined): PermissionPolicy {
+	return async (request, { agent, signal, sessionId }) => {
+		const ui = getUi(sessionId);
 		if (!ui) return autoReject(request);
 		const chosen = await ui.select(
 			`${agent.name} permission: ${request.title}`,
@@ -35,12 +35,14 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	const config = resolveConfig({ settings: loadSettings(settingsPath), env: process.env });
 	const log = config.debug ? (message: string) => process.stderr.write(`[acp] ${message}\n`) : undefined;
 
-	let ui: PermissionUi | undefined;
+	const sessionUis = new Map<string, PermissionUi>();
 	let currentSessionId: string | undefined;
 	const handle = createAcpProvider({
 		config,
 		log,
-		...(config.autoApproveTools ? {} : { permissionPolicy: interactivePolicy(() => ui) }),
+		...(config.autoApproveTools
+			? {}
+			: { permissionPolicy: interactivePolicy((sessionId) => sessionUis.get(sessionId ?? currentSessionId ?? "")) }),
 	});
 	pi.registerProvider(handle.provider);
 
@@ -83,15 +85,24 @@ export default function acpExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (event, ctx) => {
 		// A new Pi session (`/new`, `/resume`, `/fork`) gets new ACP sessions.
-		handle.resetSession(ctx.cwd);
-		currentSessionId = ctx.sessionManager.getSessionId();
-		ui = ctx.hasUI ? ctx.ui : undefined;
+		const sessionId = ctx.sessionManager.getSessionId();
+		currentSessionId = sessionId;
+		handle.resetSession(ctx.cwd, sessionId);
+		if (ctx.hasUI) sessionUis.set(sessionId, ctx.ui);
+		else sessionUis.delete(sessionId);
 		if (event.reason === "startup" && config.agents.length === 0 && ctx.hasUI) {
 			ctx.ui.notify(`ACP provider: no agents configured. Add "acp.agents" to ${settingsPath}.`, "warning");
 		}
 	});
-	pi.on("session_shutdown", () => {
-		ui = undefined;
+	pi.on("session_shutdown", (_event, ctx) => {
+		const sessionId = ctx?.sessionManager?.getSessionId?.();
+		if (sessionId) {
+			sessionUis.delete(sessionId);
+			if (currentSessionId === sessionId) currentSessionId = undefined;
+			handle.disposeSession(sessionId);
+			return;
+		}
+		sessionUis.clear();
 		currentSessionId = undefined;
 		handle.dispose();
 	});

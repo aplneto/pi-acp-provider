@@ -117,7 +117,7 @@ const zeroUsage = (): Usage => ({
 /** Decides a `session/request_permission`; `signal` aborts when the turn is cancelled. */
 export type PermissionPolicy = (
 	request: AcpPermissionRequest,
-	context: { agent: AcpAgentConfig; signal: AbortSignal | undefined },
+	context: { agent: AcpAgentConfig; signal: AbortSignal | undefined; sessionId?: string | undefined },
 ) => Promise<AcpPermissionOutcome>;
 
 export interface AcpProviderOptions {
@@ -130,7 +130,9 @@ export interface AcpProviderOptions {
 export interface AcpProviderHandle {
 	provider: Provider;
 	/** Starts fresh ACP sessions in `cwd` on the next prompt (a new Pi session). */
-	resetSession(cwd: string): void;
+	resetSession(cwd: string, sessionId?: string): void;
+	/** Disposes ACP clients and state owned by `sessionId`, leaving other sessions intact. */
+	disposeSession(sessionId: string): void;
 	/** Id of the agent that serves `modelId` (`<agent id>` or `<agent id>/<model id>`), if any. */
 	agentFor(modelId: string): string | undefined;
 	/** Slash commands the agent's current session advertised; empty until it has started. */
@@ -277,12 +279,22 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 	/** Model discovery is independent of conversational clients. */
 	const clients = new Map<string, AcpClient>();
 	const sessionClients = new Map<string, Map<string, AcpClient>>();
+	const sessionCwds = new Map<string, string>();
 	const activeClients = new Set<AcpClient>();
 	let unregisterCleanup: (() => void) | undefined;
+
+	const disposeSession = (sessionId: string): void => {
+		sessionCwds.delete(sessionId);
+		const ended = sessionClients.get(sessionId);
+		if (!ended) return;
+		sessionClients.delete(sessionId);
+		for (const client of ended.values()) client.dispose();
+	};
 
 	const answerServerRequest = async (
 		agent: AcpAgentConfig,
 		{ method, params, signal }: ServerRequest,
+		sessionId?: string,
 	): Promise<unknown> => {
 		if (method !== "session/request_permission") {
 			throw new AcpRpcError(`pi-acp-provider does not support '${method}'`, RPC_METHOD_NOT_FOUND);
@@ -291,34 +303,38 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		if (!request) throw new AcpRpcError("Malformed session/request_permission params", RPC_INVALID_PARAMS);
 		// A cancelled turn must answer every pending permission request with `cancelled`.
 		if (signal?.aborted) return { outcome: { outcome: "cancelled" } };
-		const outcome = await policy(request, { agent, signal });
+		const outcome = await policy(request, { agent, signal, sessionId });
 		return { outcome: signal?.aborted ? { outcome: "cancelled" } : outcome };
 	};
 
-	const createClient = (agent: AcpAgentConfig): AcpClient => new AcpClient({
+	const createClient = (agent: AcpAgentConfig, clientCwd = cwd, sessionId?: string): AcpClient => new AcpClient({
 		agent,
-		cwd,
+		cwd: clientCwd,
 		handshakeTimeoutMs: options.config.handshakeTimeoutMs,
-		onServerRequest: (request) => answerServerRequest(agent, request),
+		onServerRequest: (request) => answerServerRequest(agent, request, sessionId),
 		log: log && ((message) => log(`${agent.id}: ${message}`)),
 	});
 
-	const getClient = (agent: AcpAgentConfig, piSessionId?: string): AcpClient => {
+	const getClient = (agent: AcpAgentConfig, piSessionId?: string, requestCwd?: string): AcpClient => {
 		let owned = clients;
+		let clientCwd = requestCwd ?? cwd;
 		if (piSessionId) {
 			unregisterCleanup ??= registerSessionResourceCleanup((id) => {
-				if (!id) return;
-				const ended = sessionClients.get(id);
-				if (!ended) return;
-				sessionClients.delete(id);
-				for (const client of ended.values()) client.dispose();
+				if (id) disposeSession(id);
 			});
+			const knownCwd = sessionCwds.get(piSessionId);
+			if (requestCwd !== undefined && knownCwd !== requestCwd) {
+				sessionCwds.set(piSessionId, requestCwd);
+				const existing = sessionClients.get(piSessionId);
+				if (existing) for (const c of existing.values()) c.resetSession(requestCwd);
+			}
+			clientCwd = requestCwd ?? knownCwd ?? cwd;
 			owned = sessionClients.get(piSessionId) ?? new Map<string, AcpClient>();
 			sessionClients.set(piSessionId, owned);
 		}
 		let client = owned.get(agent.id);
 		if (!client) {
-			client = createClient(agent);
+			client = createClient(agent, clientCwd, piSessionId);
 			owned.set(agent.id, client);
 		}
 		return client;
@@ -355,8 +371,12 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			return;
 		}
 		// An unidentified caller cannot safely share conversation state.
+		const requestCwd = (streamOptions as (StreamOptions & { cwd?: string }) | undefined)?.cwd;
 		const transient = !streamOptions?.sessionId;
-		const acp = transient ? createClient(agent) : getClient(agent, streamOptions?.sessionId);
+		log?.(`runTurn: agent=${agent.id} sessionId=${streamOptions?.sessionId ?? "<transient>"} requestCwd=${requestCwd ?? "<none>"}`);
+		const acp = transient
+			? createClient(agent, requestCwd ?? cwd)
+			: getClient(agent, streamOptions?.sessionId, requestCwd);
 		if (activeClients.has(acp)) {
 			writer.fail("error", `Another ${agent.name} prompt is already in flight`);
 			return;
@@ -512,10 +532,17 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 
 	return {
 		provider,
-		resetSession(nextCwd: string): void {
+		resetSession(nextCwd: string, sessionId?: string): void {
+			if (sessionId) {
+				sessionCwds.set(sessionId, nextCwd);
+				const owned = sessionClients.get(sessionId);
+				if (owned) for (const client of owned.values()) client.resetSession(nextCwd);
+				return;
+			}
 			cwd = nextCwd;
 			for (const client of clients.values()) client.resetSession(nextCwd);
 		},
+		disposeSession,
 		agentFor: (modelId) => parseModelId(modelId, agents)?.agent.id,
 		commands: async (agentId, sessionId) => {
 			const client = (sessionId && sessionClients.get(sessionId)?.get(agentId)) || clients.get(agentId);
@@ -526,6 +553,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			clients.clear();
 			for (const owned of sessionClients.values()) for (const client of owned.values()) client.dispose();
 			sessionClients.clear();
+			sessionCwds.clear();
 			unregisterCleanup?.();
 			unregisterCleanup = undefined;
 		},

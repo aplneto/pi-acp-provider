@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { cleanupSessionResources } from "@earendil-works/pi-ai";
@@ -494,4 +497,61 @@ test("an agent slash command sent as the prompt returns the agent's output", asy
 	assert.ok(last?.type === "done");
 	assert.equal(messageText(last.message), "context: 42%");
 	assert.deepEqual((await handle.commands("fake", "command-session")).map((command) => command.name), ["context", "session"]);
+});
+
+test("sessions keep independent cwds across resetSession and non-LIFO disposeSession", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-acp-cwds-"));
+	const dirA = join(root, "a");
+	const dirB = join(root, "b");
+	mkdirSync(dirA);
+	mkdirSync(dirB);
+	try {
+		const handle = makeProvider();
+		const model = firstModel(handle);
+		handle.resetSession(dirA, "sess-a");
+		handle.resetSession(dirB, "sess-b");
+
+		const [resA, resB] = await Promise.all([
+			collect(handle.provider.streamSimple(model, userContext("CWD"), { sessionId: "sess-a" })),
+			collect(handle.provider.streamSimple(model, userContext("CWD"), { sessionId: "sess-b" })),
+		]);
+		const lastA = resA.at(-1);
+		const lastB = resB.at(-1);
+		assert.ok(lastA?.type === "done" && lastB?.type === "done");
+		assert.equal(realpathSync(messageText(lastA.message)), realpathSync(dirA));
+		assert.equal(realpathSync(messageText(lastB.message)), realpathSync(dirB));
+
+		// Disposing sess-b must not affect sess-a's process or cwd.
+		handle.disposeSession("sess-b");
+		const followUpA = (await collect(handle.provider.streamSimple(model, userContext("CWD"), { sessionId: "sess-a" }))).at(-1);
+		assert.ok(followUpA?.type === "done");
+		assert.equal(realpathSync(messageText(followUpA.message)), realpathSync(dirA));
+		handle.dispose();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("streamOptions.cwd overrides the session cwd for identified and transient calls", async () => {
+	const root = mkdtempSync(join(tmpdir(), "pi-acp-stream-cwd-"));
+	const dirA = join(root, "a");
+	const dirB = join(root, "b");
+	mkdirSync(dirA);
+	mkdirSync(dirB);
+	try {
+		const handle = makeProvider();
+		const model = firstModel(handle);
+		const identified = (
+			await collect(handle.provider.streamSimple(model, userContext("CWD"), { sessionId: "sess-cwd", cwd: dirA } as never))
+		).at(-1);
+		const transient = (
+			await collect(handle.provider.streamSimple(model, userContext("CWD"), { cwd: dirB } as never))
+		).at(-1);
+		assert.ok(identified?.type === "done" && transient?.type === "done");
+		assert.equal(realpathSync(messageText(identified.message)), realpathSync(dirA));
+		assert.equal(realpathSync(messageText(transient.message)), realpathSync(dirB));
+		handle.dispose();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });

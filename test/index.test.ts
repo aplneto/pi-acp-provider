@@ -121,3 +121,45 @@ test("each agent gets a command that completes and runs its advertised slash com
 			handlers.get("session_shutdown")?.({}, {});
 		},
 	));
+
+test("session_shutdown with sessionManager disposes only the ended session", () =>
+	withSettings(
+		{ acp: { agents: { fake: { command: process.execPath, args: [fileURLToPath(new URL("./fake-agent.mjs", import.meta.url))] } } } },
+		async () => {
+			const { pi, providers, handlers } = makeFakePi();
+			acpExtension(pi);
+			const provider = providers[0] as {
+				getModels: () => { id: string }[];
+				streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<{ stopReason: string; content: { type: string; text: string }[] }> };
+			};
+			const root = mkdtempSync(join(tmpdir(), "pi-acp-idx-"));
+			const dirA = join(root, "a");
+			const dirB = join(root, "b");
+			const { mkdirSync, realpathSync, rmSync } = await import("node:fs");
+			const { normalizeContext } = await import("@earendil-works/pi-ai/utils/transcript");
+			mkdirSync(dirA);
+			mkdirSync(dirB);
+			try {
+				const ctxA = { cwd: dirA, hasUI: false, sessionManager: { getSessionId: () => "sess-a" } };
+				const ctxB = { cwd: dirB, hasUI: false, sessionManager: { getSessionId: () => "sess-b" } };
+				handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctxA);
+				handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctxB);
+
+				const model = provider.getModels()[0];
+				const ctx = normalizeContext({ messages: [{ role: "user", content: "CWD", timestamp: Date.now() }] });
+				const firstA = await provider.streamSimple(model, ctx, { sessionId: "sess-a" }).result();
+				assert.equal(firstA.stopReason, "stop");
+				assert.equal(realpathSync(firstA.content.map((b) => b.text).join("")), realpathSync(dirA));
+
+				// Shutting down sess-b must not dispose sess-a.
+				handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctxB);
+				const secondA = await provider.streamSimple(model, ctx, { sessionId: "sess-a" }).result();
+				assert.equal(secondA.stopReason, "stop");
+				assert.equal(realpathSync(secondA.content.map((b) => b.text).join("")), realpathSync(dirA));
+
+				handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctxA);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		},
+	));
