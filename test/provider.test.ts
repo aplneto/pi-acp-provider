@@ -132,6 +132,30 @@ test("concurrent Pi sessions using the same ACP agent get independent results", 
 	assert.equal(messageText(second.message), "beta");
 });
 
+for (const supportsSystemPrompt of [false, true]) {
+	test(`directives persist across turns (system prompt support: ${supportsSystemPrompt})`, async () => {
+		const handle = makeProvider([fakeAgent({ env: { FAKE_DIRECTIVE: "1", ...(supportsSystemPrompt ? { FAKE_SYSTEM_PROMPT: "1" } : {}) } })]);
+		const model = firstModel(handle);
+		const payloads: string[] = [];
+		const run = async (sessionId: string, directive: string) => {
+			const context = normalizeContext({ systemPrompt: directive, messages: [{ role: "user", content: "say hello", timestamp: Date.now() }] });
+			return (await collect(handle.provider.streamSimple(model, context, { sessionId, onPayload: (payload) => { payloads.push(JSON.stringify(payload)); } }))).at(-1);
+		};
+		const first = await run("directive-one", "Start replies with DIRECTIVE-PROBE");
+		const followup = await run("directive-one", "Start replies with DIRECTIVE-PROBE");
+		const other = await run("directive-two", "No marker");
+		assert.ok(first?.type === "done" && followup?.type === "done" && other?.type === "done");
+		assert.match(messageText(first.message), /^DIRECTIVE-PROBE/);
+		assert.match(messageText(followup.message), /^DIRECTIVE-PROBE/);
+		assert.doesNotMatch(messageText(other.message), /DIRECTIVE-PROBE/);
+		assert.equal(payloads[0]?.includes("DIRECTIVE-PROBE"), !supportsSystemPrompt);
+		assert.equal(payloads[1]?.includes("DIRECTIVE-PROBE"), false);
+		const changed = await run("directive-one", "Changed instructions");
+		assert.ok(changed?.type === "error");
+		assert.match(changed.error.errorMessage ?? "", /instructions changed/);
+	});
+}
+
 test("overlapping turns in the same Pi session report a conflict", async () => {
 	const handle = makeProvider();
 	const model = firstModel(handle);

@@ -101,6 +101,7 @@ interface Connection {
 	proc: ChildProcessWithoutNullStreams;
 	state: "starting" | "ready";
 	session: Promise<string> | null;
+	sessionInstructions: string | undefined;
 	/** Whether the current session has received a prompt (and so has history). */
 	sessionUsed: boolean;
 	/** Every session this process created, by session id. */
@@ -111,6 +112,7 @@ interface Connection {
 
 export interface EnsureSessionOptions {
 	signal?: AbortSignal | undefined;
+	instructions?: string | undefined;
 	/**
 	 * Whether `auth_required` may trigger the configured `authenticate` method.
 	 * Background work turns it off, since a method may wait on a browser login.
@@ -236,16 +238,24 @@ export class AcpClient {
 	}
 
 	/** Returns the current ACP session, creating one (and the process) on demand. */
-	async ensureSession({ signal, authenticate = true }: EnsureSessionOptions = {}): Promise<string> {
+	async ensureSession({ signal, authenticate = true, instructions }: EnsureSessionOptions = {}): Promise<string> {
 		await this.ensureReady(signal);
 		const conn = this.conn;
 		if (!conn) throw new Error(`${this.options.agent.name} is not running`);
-		conn.session ??= this.newSession(conn, authenticate).catch((error: unknown) => {
+		if (conn.session && conn.sessionInstructions !== instructions) {
+			if (conn.sessionUsed) throw new Error("ACP session instructions changed; start a new Pi session to apply them");
+			conn.session = null;
+		}
+		conn.sessionInstructions = instructions;
+		conn.session ??= this.newSession(conn, authenticate, instructions).catch((error: unknown) => {
 			conn.session = null;
 			throw error;
 		});
 		return abortable(conn.session, signal);
 	}
+
+	/** True until a prompt has been sent on the current session. */
+	get isFirstPrompt(): boolean { return !this.conn?.sessionUsed; }
 
 	/** Slash commands the current session advertised (`available_commands_update`). */
 	async currentCommands(): Promise<AcpCommand[]> {
@@ -304,10 +314,10 @@ export class AcpClient {
 		if (this.turn) throw new Error(`Another ${this.options.agent.name} prompt is already in flight`);
 		const { sessionId, signal } = request;
 		this.turn = request;
-		if (this.conn) this.conn.sessionUsed = true;
 		try {
 			await this.draining;
 			if (signal?.aborted) return { kind: "aborted" };
+			if (this.conn) this.conn.sessionUsed = true;
 			const response = this.request("session/prompt", request.payload);
 			const finished = response.then((result): PromptResult => ({
 				kind: "finished",
@@ -337,10 +347,14 @@ export class AcpClient {
 	}
 
 	/** `session/new`, authenticating once with the configured method if the agent asks. */
-	private async newSession(conn: Connection, authenticate: boolean): Promise<string> {
+	private async newSession(conn: Connection, authenticate: boolean, instructions?: string): Promise<string> {
 		const create = async () => {
 			const { sessionId, config } = parseNewSessionResult(
-				await this.request("session/new", { cwd: this.cwd, mcpServers: [] }, this.options.handshakeTimeoutMs),
+				await this.request("session/new", {
+					cwd: this.cwd,
+					mcpServers: [],
+					...(instructions && this.agentInfo?.supportsSystemPrompt ? { systemPrompt: { mode: "append", content: [{ type: "text", text: instructions }] } } : {}),
+				}, this.options.handshakeTimeoutMs),
 			);
 			conn.sessions.set(sessionId, { config, initialModel: config.model?.currentValue });
 			return sessionId;
@@ -395,7 +409,7 @@ export class AcpClient {
 			// Own process group, so the whole tree can be killed at once.
 			detached: !IS_WINDOWS,
 		});
-		const conn: Connection = { proc, state: "starting", session: null, sessionUsed: false, sessions: new Map(), commands: new Map() };
+		const conn: Connection = { proc, state: "starting", session: null, sessionInstructions: undefined, sessionUsed: false, sessions: new Map(), commands: new Map() };
 		this.conn = conn;
 		track(proc);
 

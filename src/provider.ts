@@ -30,6 +30,7 @@ import {
 	type TranscriptContext,
 	type Usage,
 } from "@earendil-works/pi-ai";
+import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
 import { AcpClient, AcpRpcError, type ServerRequest } from "./acp-client.ts";
 import {
 	ACP_AUTH_REQUIRED,
@@ -344,6 +345,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			return;
 		}
 		const { agent } = target;
+		const instructions = getCurrentSystemPrompt(context.messages).trim() || undefined;
 		const promptText = latestUserPrompt(context.messages);
 		if (promptText === null) {
 			writer.fail("error", `No user message found to send to ${agent.name}.`);
@@ -359,7 +361,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		// Setup failures (spawn, handshake, session) end the stream before `start`.
 		let sessionId: string;
 		try {
-			sessionId = await acp.ensureSession({ signal });
+			sessionId = await acp.ensureSession({ signal, instructions });
 			await applySettings(acp, agent, sessionId, target.modelId, model, streamOptions);
 		} catch (error) {
 			abortedOrError(error);
@@ -370,7 +372,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		const renderTool = createToolRenderer((text) => writer.append("text", text));
 		const onProviderStreamEvent = streamOptions?.onProviderStreamEvent;
 		try {
-			const defaultPayload = { sessionId, prompt: [{ type: "text", text: promptText }] };
+			const text = instructions && !acp.info?.supportsSystemPrompt && acp.isFirstPrompt
+				? `Instructions for this conversation (provided by the client):\n\n${instructions}\n\nUser request:\n\n${promptText}`
+				: promptText;
+			const defaultPayload = { sessionId, prompt: [{ type: "text", text }] };
 			const payload = (await streamOptions?.onPayload?.(defaultPayload, model)) ?? defaultPayload;
 			const result = await acp.prompt({
 				sessionId,

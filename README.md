@@ -114,6 +114,13 @@ Global keys:
   cannot safely represent independent concurrent conversations. Each Pi model
   turn sends only the new user message, because the agent keeps conversation
   history on its side. Image attachments are noted but not forwarded.
+- **Instructions**: Pi's current system instructions are sent when the ACP
+  session starts. Agents advertising session system-prompt support receive them
+  in append mode. Otherwise they are prepended to the first user prompt; that
+  fallback has user-message semantics and does not guarantee system-level
+  precedence. Instructions are not repeated on follow-up turns. If they change
+  during a used session, the provider reports an error and requires a new Pi
+  session rather than silently using stale instructions.
 - **Streaming**: ACP v1 `session/update` notifications. `agent_thought_chunk`
   maps to Pi thinking blocks and `agent_message_chunk` to text blocks. Tool
   calls render as `⚙️ Executing [title]...` and, on completion,

@@ -78,6 +78,7 @@ let promptCounter = 0;
 let serverRequestId = 0;
 const serverRequestWaiters = new Map();
 let activePrompt = null;
+let directiveEnabled = false;
 
 function serverRequest(method, params) {
 	return new Promise((resolve) => {
@@ -100,6 +101,11 @@ async function handlePrompt(message) {
 	};
 	activePrompt = turn;
 	const stepDelay = text.includes("SLOW") ? 150 : 5;
+	if (process.env.FAKE_DIRECTIVE === "1") {
+		if (text.includes("DIRECTIVE-PROBE")) directiveEnabled = true;
+		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: directiveEnabled ? "DIRECTIVE-PROBE acknowledged" : "acknowledged" } });
+		return turn.finish("end_turn");
+	}
 
 	if (text === "/context") {
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "context: 42%" } });
@@ -189,7 +195,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		case "initialize":
 			reply(message.id, {
 				protocolVersion: Number(process.env.FAKE_PROTOCOL ?? 1),
-				agentCapabilities: { loadSession: false },
+				agentCapabilities: { loadSession: false, ...(process.env.FAKE_SYSTEM_PROMPT === "1" ? { sessionCapabilities: { systemPrompt: {} } } : {}) },
 				agentInfo: { name: `fake-agent-${process.pid}`, version: "0.0.1" },
 				authMethods: [{ id: "fake-login", name: "Fake login", description: "Pretend to sign in" }],
 			});
@@ -206,6 +212,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 			if (!authenticated) replyError(message.id, -32000, "Authentication required");
 			else {
 				const sessionId = `sess-${++sessionCounter}`;
+				directiveEnabled = JSON.stringify(message.params.systemPrompt ?? "").includes("DIRECTIVE-PROBE");
 				reply(message.id, { sessionId, ...sessionExtras() });
 				update(sessionId, {
 					sessionUpdate: "available_commands_update",
