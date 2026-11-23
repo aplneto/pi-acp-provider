@@ -107,6 +107,18 @@ async function handlePrompt(message) {
 	}
 	if (text.includes("AUTH")) return replyError(message.id, -32000, "Authentication required");
 	if (text.includes("RPCERROR")) return replyError(message.id, -32603, "fake rpc failure");
+	if (text.startsWith("ECHO ")) {
+		await sleep(150);
+		if (turn.finished) return;
+		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: text.slice(5) } });
+		return turn.finish("end_turn");
+	}
+	if (text.startsWith("BRIDGE ")) {
+		const response = await serverRequest("probe/tool", { sessionId, input: text.slice(7) });
+		if (turn.finished) return;
+		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: response.result?.output ?? "denied" } });
+		return turn.finish("end_turn");
+	}
 
 	let approved = null;
 	if (text.includes("PERMISSION")) {

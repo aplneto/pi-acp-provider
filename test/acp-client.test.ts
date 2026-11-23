@@ -158,6 +158,29 @@ test("concurrent prompt is rejected while one is in flight", async () => {
 	await first;
 });
 
+test("independent clients can wait on and receive separate client-side tool results", async () => {
+	const pending = new Map<string, (value: unknown) => void>();
+	let notifyReady: (() => void) | undefined;
+	const ready = new Promise<void>((resolve) => { notifyReady = resolve; });
+	const handler: ServerRequestHandler = ({ method, params }) => {
+		assert.equal(method, "probe/tool");
+		const input = (params as { input: string }).input;
+		return new Promise((resolve) => {
+			pending.set(input, resolve);
+			if (pending.size === 2) notifyReady?.();
+		});
+	};
+	const first = makeClient({ onServerRequest: handler });
+	const second = makeClient({ onServerRequest: handler });
+	const results = Promise.all([runPrompt(first, "BRIDGE one"), runPrompt(second, "BRIDGE two")]);
+	await ready;
+	pending.get("two")?.({ output: "result two" });
+	pending.get("one")?.({ output: "result one" });
+	const [one, two] = await results;
+	assert.equal(one?.reply, "result one");
+	assert.equal(two?.reply, "result two");
+});
+
 test("disposed client refuses new work", async () => {
 	const client = makeClient();
 	await client.ensureReady();

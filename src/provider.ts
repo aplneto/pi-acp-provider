@@ -16,6 +16,7 @@
 
 import {
 	createAssistantMessageEventStream,
+	registerSessionResourceCleanup,
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
@@ -272,8 +273,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		options.config.agents.flatMap((agent) => discovered.get(agent.id) ?? agentModels(agent));
 	let models = buildModels();
 	let cwd = process.cwd();
-	/** One client (and agent process) per agent, spawned on first use. */
+	/** Legacy callers and model discovery, which have no Pi session identifier. */
 	const clients = new Map<string, AcpClient>();
+	const sessionClients = new Map<string, Map<string, AcpClient>>();
+	let unregisterCleanup: (() => void) | undefined;
 
 	const answerServerRequest = async (
 		agent: AcpAgentConfig,
@@ -290,8 +293,20 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		return { outcome: signal?.aborted ? { outcome: "cancelled" } : outcome };
 	};
 
-	const getClient = (agent: AcpAgentConfig): AcpClient => {
-		let client = clients.get(agent.id);
+	const getClient = (agent: AcpAgentConfig, piSessionId?: string): AcpClient => {
+		let owned = clients;
+		if (piSessionId) {
+			unregisterCleanup ??= registerSessionResourceCleanup((id) => {
+				if (!id) return;
+				const ended = sessionClients.get(id);
+				if (!ended) return;
+				sessionClients.delete(id);
+				for (const client of ended.values()) client.dispose();
+			});
+			owned = sessionClients.get(piSessionId) ?? new Map<string, AcpClient>();
+			sessionClients.set(piSessionId, owned);
+		}
+		let client = owned.get(agent.id);
 		if (!client) {
 			client = new AcpClient({
 				agent,
@@ -300,7 +315,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 				onServerRequest: (request) => answerServerRequest(agent, request),
 				log: log && ((message) => log(`${agent.id}: ${message}`)),
 			});
-			clients.set(agent.id, client);
+			owned.set(agent.id, client);
 		}
 		return client;
 	};
@@ -334,7 +349,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			writer.fail("error", `No user message found to send to ${agent.name}.`);
 			return;
 		}
-		const acp = getClient(agent);
+		const acp = getClient(agent, streamOptions?.sessionId);
 		const abortedOrError = (error: unknown): void => {
 			if (signal?.aborted) writer.fail("aborted", "Request was aborted");
 			else if (error instanceof AcpRpcError && error.code === ACP_AUTH_REQUIRED) writer.fail("error", authHint(agent, acp.info));
@@ -486,6 +501,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		dispose(): void {
 			for (const client of clients.values()) client.dispose();
 			clients.clear();
+			for (const owned of sessionClients.values()) for (const client of owned.values()) client.dispose();
+			sessionClients.clear();
+			unregisterCleanup?.();
+			unregisterCleanup = undefined;
 		},
 	};
 }

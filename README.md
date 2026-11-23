@@ -14,7 +14,7 @@ GitHub Copilot CLI, Gemini CLI, or any other command that speaks ACP over stdio.
 │                  ACP Provider Extension                │
 │        streamSimple() → ACP client (NDJSON RPC)        │
 └───────────────────────────┼────────────────────────────┘
-                            │ stdio (stdin / stdout), one process per agent
+                            │ stdio (stdin / stdout), one process per session and agent
 ┌───────────────────────────▼────────────────────────────┐
 │          ACP agent (e.g. `copilot --acp`, `gemini …`)  │
 │       (Autonomous agent, file tools, bash, LSP)        │
@@ -102,13 +102,16 @@ Global keys:
 
 ## Behavior
 
-- **Lifecycle**: each agent's process spawns lazily on its first prompt,
-  stays alive across prompts, and is killed on session shutdown (`/new`,
-  `/resume`, quit, reload). Each agent runs in its own process group, so the
+- **Lifecycle**: each Pi session and agent gets a separate process, spawned
+  lazily on its first prompt and retained for follow-ups. Session resource
+  cleanup kills its processes; provider shutdown kills all remaining processes.
+  Model discovery may use a separate process. Each agent runs in its own process group, so the
   whole tree (including tool subprocesses) is killed. Parent signal hooks,
   shared by all agents, cover exits without a session shutdown. A crashed
   agent is respawned with a fresh session on the next prompt.
-- **Session mapping**: one ACP session per Pi session per agent. Each Pi model
+- **Session mapping**: one ACP session per Pi session per agent when Pi supplies
+  a session ID. Calls without an ID share the legacy per-agent session and
+  cannot safely represent independent concurrent conversations. Each Pi model
   turn sends only the new user message, because the agent keeps conversation
   history on its side. Image attachments are noted but not forwarded.
 - **Streaming**: ACP v1 `session/update` notifications. `agent_thought_chunk`

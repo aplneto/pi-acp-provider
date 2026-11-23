@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { cleanupSessionResources } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
@@ -116,6 +117,60 @@ test("agents run as separate processes with separate sessions", async () => {
 	assert.match(messageText(first.message), /#0/);
 	assert.match(messageText(second.message), /#0/);
 	assert.equal(second.message.model, "other");
+});
+
+test("concurrent Pi sessions using the same ACP agent get independent results", async () => {
+	const handle = makeProvider();
+	const model = firstModel(handle);
+	const run = async (sessionId: string, text: string) =>
+		(await collect(handle.provider.streamSimple(model, userContext(`ECHO ${text}`), { sessionId }))).at(-1);
+	const [first, second] = await Promise.all([run("session-one", "alpha"), run("session-two", "beta")]);
+	assert.equal(first?.type, "done");
+	assert.equal(second?.type, "done");
+	if (first?.type !== "done" || second?.type !== "done") return;
+	assert.equal(messageText(first.message), "alpha");
+	assert.equal(messageText(second.message), "beta");
+});
+
+test("overlapping turns in the same Pi session report a conflict", async () => {
+	const handle = makeProvider();
+	const model = firstModel(handle);
+	const run = async (text: string) =>
+		(await collect(handle.provider.streamSimple(model, userContext(`ECHO ${text}`), { sessionId: "same" }))).at(-1);
+	const outcomes = await Promise.all([run("first"), run("second")]);
+	assert.equal(outcomes.filter((outcome) => outcome?.type === "done").length, 1);
+	const error = outcomes.find((outcome) => outcome?.type === "error");
+	assert.ok(error?.type === "error");
+	assert.match(error.error.errorMessage ?? "", /already in flight/);
+});
+
+test("session cleanup replaces only the ended session's client", async () => {
+	const handle = makeProvider();
+	const model = firstModel(handle);
+	const run = async (sessionId: string) =>
+		(await collect(handle.provider.streamSimple(model, userContext("hello"), { sessionId }))).at(-1);
+	const [first, other] = await Promise.all([run("cleanup-one"), run("cleanup-two")]);
+	assert.equal(first?.type, "done");
+	assert.equal(other?.type, "done");
+	cleanupSessionResources("cleanup-one");
+	const [restarted, continued] = await Promise.all([run("cleanup-one"), run("cleanup-two")]);
+	assert.ok(restarted?.type === "done" && continued?.type === "done");
+	assert.match(messageText(restarted.message), /#0/);
+	assert.match(messageText(continued.message), /#1/);
+});
+
+test("aborting one Pi session does not abort another session", async () => {
+	const handle = makeProvider();
+	const model = firstModel(handle);
+	const controller = new AbortController();
+	const first = collect(handle.provider.streamSimple(model, userContext("SLOW first"), { sessionId: "abort-one", signal: controller.signal }));
+	const second = collect(handle.provider.streamSimple(model, userContext("ECHO second"), { sessionId: "abort-two" }));
+	setTimeout(() => controller.abort(), 100);
+	const [aborted, completed] = await Promise.all([first, second]);
+	assert.equal(aborted.at(-1)?.type, "error");
+	const last = completed.at(-1);
+	assert.ok(last?.type === "done");
+	assert.equal(messageText(last.message), "second");
 });
 
 test("a tool call reported already completed renders its result", async () => {
