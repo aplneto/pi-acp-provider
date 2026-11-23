@@ -21,6 +21,7 @@
  *                   is called with methodId "fake-login"
  */
 
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 const SPLIT = process.env.FAKE_SPLIT === "1";
@@ -79,6 +80,39 @@ let serverRequestId = 0;
 const serverRequestWaiters = new Map();
 let activePrompt = null;
 let directiveEnabled = false;
+let mcpChild = null;
+let mcpNextId = 1;
+const mcpWaiters = new Map();
+
+function startMcpServer(server) {
+	if (mcpChild || !server?.command) return;
+	const env = { ...process.env };
+	for (const entry of server.env ?? []) {
+		if (entry?.name && typeof entry.value === "string") env[entry.name] = entry.value;
+	}
+	mcpChild = spawn(server.command, server.args ?? [], { env, stdio: ["pipe", "pipe", "pipe"] });
+	createInterface({ input: mcpChild.stdout }).on("line", (line) => {
+		if (!line.trim()) return;
+		try {
+			const msg = JSON.parse(line);
+			const waiter = mcpWaiters.get(msg.id);
+			if (waiter) {
+				mcpWaiters.delete(msg.id);
+				waiter(msg);
+			}
+		} catch {}
+	});
+	process.on("exit", () => mcpChild?.kill());
+}
+
+function mcpCall(method, params) {
+	if (!mcpChild?.stdin.writable) return Promise.reject(new Error("MCP server not started"));
+	const id = mcpNextId++;
+	return new Promise((resolve) => {
+		mcpWaiters.set(id, resolve);
+		mcpChild.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+	});
+}
 
 function serverRequest(method, params) {
 	return new Promise((resolve) => {
@@ -131,6 +165,26 @@ async function handlePrompt(message) {
 		const response = await serverRequest("probe/tool", { sessionId, input: text.slice(7) });
 		if (turn.finished) return;
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: response.result?.output ?? "denied" } });
+		return turn.finish("end_turn");
+	}
+	if (text.startsWith("MCP ") || text.startsWith("MCP_CRASH ")) {
+		const crash = text.startsWith("MCP_CRASH ");
+		const rest = text.slice(crash ? 10 : 4);
+		const space = rest.indexOf(" ");
+		const toolName = space < 0 ? rest : rest.slice(0, space);
+		const args = space < 0 ? {} : JSON.parse(rest.slice(space + 1));
+		await mcpCall("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "fake-acp", version: "1.0.0" } });
+		await mcpCall("tools/list", {});
+		const callPromise = mcpCall("tools/call", { name: toolName, arguments: args });
+		if (crash) {
+			await sleep(20);
+			process.exit(1);
+		}
+		const response = await callPromise;
+		if (turn.finished) return;
+		const isError = response.result?.isError ?? Boolean(response.error);
+		const contentText = response.result?.content?.[0]?.text ?? response.error?.message ?? "";
+		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `mcp:${isError}:${contentText}` } });
 		return turn.finish("end_turn");
 	}
 
@@ -221,6 +275,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 			else {
 				const sessionId = `sess-${++sessionCounter}`;
 				directiveEnabled = JSON.stringify(message.params.systemPrompt ?? "").includes("DIRECTIVE-PROBE");
+				if (Array.isArray(message.params.mcpServers) && message.params.mcpServers.length > 0) {
+					startMcpServer(message.params.mcpServers[0]);
+				}
 				reply(message.id, { sessionId, ...sessionExtras() });
 				update(sessionId, {
 					sessionUpdate: "available_commands_update",

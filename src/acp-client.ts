@@ -110,9 +110,22 @@ interface Connection {
 	commands: Map<string, AcpCommand[]>;
 }
 
+export interface McpServerEnv {
+	name: string;
+	value: string;
+}
+
+export interface McpServerConfig {
+	name: string;
+	command: string;
+	args: string[];
+	env: McpServerEnv[];
+}
+
 export interface EnsureSessionOptions {
 	signal?: AbortSignal | undefined;
 	instructions?: string | undefined;
+	mcpServers?: McpServerConfig[] | undefined;
 	/**
 	 * Whether `auth_required` may trigger the configured `authenticate` method.
 	 * Background work turns it off, since a method may wait on a browser login.
@@ -238,7 +251,7 @@ export class AcpClient {
 	}
 
 	/** Returns the current ACP session, creating one (and the process) on demand. */
-	async ensureSession({ signal, authenticate = true, instructions }: EnsureSessionOptions = {}): Promise<string> {
+	async ensureSession({ signal, authenticate = true, instructions, mcpServers }: EnsureSessionOptions = {}): Promise<string> {
 		await this.ensureReady(signal);
 		const conn = this.conn;
 		if (!conn) throw new Error(`${this.options.agent.name} is not running`);
@@ -247,7 +260,7 @@ export class AcpClient {
 			conn.session = null;
 		}
 		conn.sessionInstructions = instructions;
-		conn.session ??= this.newSession(conn, authenticate, instructions).catch((error: unknown) => {
+		conn.session ??= this.newSession(conn, authenticate, instructions, mcpServers).catch((error: unknown) => {
 			conn.session = null;
 			throw error;
 		});
@@ -347,12 +360,17 @@ export class AcpClient {
 	}
 
 	/** `session/new`, authenticating once with the configured method if the agent asks. */
-	private async newSession(conn: Connection, authenticate: boolean, instructions?: string): Promise<string> {
+	private async newSession(
+		conn: Connection,
+		authenticate: boolean,
+		instructions?: string,
+		mcpServers?: McpServerConfig[],
+	): Promise<string> {
 		const create = async () => {
 			const { sessionId, config } = parseNewSessionResult(
 				await this.request("session/new", {
 					cwd: this.cwd,
-					mcpServers: [],
+					mcpServers: mcpServers ?? [],
 					...(instructions && this.agentInfo?.supportsSystemPrompt ? { systemPrompt: { mode: "append", content: [{ type: "text", text: instructions }] } } : {}),
 				}, this.options.handshakeTimeoutMs),
 			);

@@ -27,11 +27,15 @@ import {
 	type SimpleStreamOptions,
 	type StreamOptions,
 	type ThinkingLevelMap,
+	type ToolCall,
+	type ToolResultMessage,
 	type TranscriptContext,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import { getCurrentSystemPrompt } from "@earendil-works/pi-ai/utils/transcript";
-import { AcpClient, AcpRpcError, type ServerRequest } from "./acp-client.ts";
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { AcpClient, AcpRpcError, type PromptResult, type ServerRequest } from "./acp-client.ts";
+import { McpBridge, toMcpToolResult } from "./mcp-bridge.ts";
+import { ToolHandoff, type ToolHandoffCall } from "./tool-handoff.ts";
 import {
 	ACP_AUTH_REQUIRED,
 	RPC_INVALID_PARAMS,
@@ -191,6 +195,21 @@ function createMessageWriter(stream: AssistantMessageEventStream, message: Assis
 		stream.push({ type: `${type}_delta`, contentIndex: open.contentIndex, delta, partial: message });
 	};
 
+	const toolCall = (call: ToolHandoffCall): void => {
+		close();
+		const contentIndex = message.content.length;
+		const block: ToolCall = {
+			type: "toolCall",
+			id: call.id,
+			name: call.name,
+			arguments: call.arguments as ToolCall["arguments"],
+		};
+		message.content.push(block);
+		stream.push({ type: "toolcall_start", contentIndex, partial: message });
+		stream.push({ type: "toolcall_delta", contentIndex, delta: JSON.stringify(call.arguments ?? {}), partial: message });
+		stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial: message });
+	};
+
 	let settled = false;
 	/** Closes the open block and ends the stream; later calls are ignored. */
 	const settle = (push: () => void): void => {
@@ -200,7 +219,7 @@ function createMessageWriter(stream: AssistantMessageEventStream, message: Assis
 		push();
 		stream.end(message);
 	};
-	const done = (reason: "stop" | "length"): void =>
+	const done = (reason: "stop" | "length" | "toolUse"): void =>
 		settle(() => {
 			message.stopReason = reason;
 			stream.push({ type: "done", reason, message });
@@ -212,7 +231,7 @@ function createMessageWriter(stream: AssistantMessageEventStream, message: Assis
 			stream.push({ type: "error", reason, error: message });
 		});
 
-	return { append, done, fail };
+	return { append, toolCall, done, fail };
 }
 
 type MessageWriter = ReturnType<typeof createMessageWriter>;
@@ -276,14 +295,39 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		options.config.agents.flatMap((agent) => discovered.get(agent.id) ?? agentModels(agent));
 	let models = buildModels();
 	let cwd = process.cwd();
+	interface PendingTurn {
+		acp: AcpClient;
+		agent: AcpAgentConfig;
+		piSessionId: string | undefined;
+		bridge: McpBridge | undefined;
+		handoff: ToolHandoff;
+		transient: boolean;
+		promptPromise: Promise<PromptResult>;
+		bufferedUpdates: AcpSessionUpdate[];
+		sink: ((update: AcpSessionUpdate) => void) | null;
+	}
+
 	/** Model discovery is independent of conversational clients. */
 	const clients = new Map<string, AcpClient>();
 	const sessionClients = new Map<string, Map<string, AcpClient>>();
 	const sessionCwds = new Map<string, string>();
+	const sessionBridges = new Map<string, McpBridge>();
+	const pendingTurns = new Map<string, PendingTurn>();
 	const activeClients = new Set<AcpClient>();
 	let unregisterCleanup: (() => void) | undefined;
 
 	const disposeSession = (sessionId: string): void => {
+		const pending = pendingTurns.get(sessionId);
+		if (pending) {
+			pendingTurns.delete(sessionId);
+			pending.handoff.close("Session disposed");
+			activeClients.delete(pending.acp);
+		}
+		const bridge = sessionBridges.get(sessionId);
+		if (bridge) {
+			sessionBridges.delete(sessionId);
+			bridge.close();
+		}
 		sessionCwds.delete(sessionId);
 		const ended = sessionClients.get(sessionId);
 		if (!ended) return;
@@ -340,6 +384,76 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		return client;
 	};
 
+	function cleanupPendingTurn(pending: PendingTurn): void {
+		if (pending.piSessionId && pendingTurns.get(pending.piSessionId) === pending) {
+			pendingTurns.delete(pending.piSessionId);
+		}
+		pending.bridge?.clearHandoff(pending.handoff);
+		pending.handoff.close();
+		activeClients.delete(pending.acp);
+		if (pending.transient) {
+			pending.acp.dispose();
+			pending.bridge?.close();
+		}
+	}
+
+	async function driveTurn(
+		pending: PendingTurn,
+		writer: MessageWriter,
+		signal: AbortSignal | undefined,
+	): Promise<void> {
+		const renderTool = createToolRenderer((text) => writer.append("text", text));
+		const sink = (update: AcpSessionUpdate): void => {
+			if (update.type === "agent_message_chunk") writer.append("text", update.text);
+			else if (update.type === "agent_thought_chunk") writer.append("thinking", update.text);
+			else renderTool(update);
+		};
+		for (const update of pending.bufferedUpdates.splice(0)) sink(update);
+		pending.sink = sink;
+
+		const abortedOrError = (error: unknown): void => {
+			if (signal?.aborted) writer.fail("aborted", "Request was aborted");
+			else if (error instanceof AcpRpcError && error.code === ACP_AUTH_REQUIRED) writer.fail("error", authHint(pending.agent, pending.acp.info));
+			else writer.fail("error", errorMessage(error));
+		};
+
+		try {
+			const outcome = await Promise.race([
+				pending.handoff.next().then((call) => ({ kind: "call" as const, call })),
+				pending.promptPromise.then(
+					(result) => ({ kind: "prompt" as const, result }),
+					(error: unknown) => ({ kind: "error" as const, error }),
+				),
+			]);
+			if (outcome.kind === "call" && outcome.call) {
+				pending.sink = null;
+				if (pending.piSessionId) pendingTurns.set(pending.piSessionId, pending);
+				writer.toolCall(outcome.call);
+				writer.done("toolUse");
+				return;
+			}
+			if (outcome.kind === "call") {
+				try {
+					const result = await pending.promptPromise;
+					cleanupPendingTurn(pending);
+					if (result.kind === "aborted") writer.fail("aborted", "Request was aborted");
+					else finishTurn(writer, pending.agent, result.stopReason);
+				} catch (error) {
+					cleanupPendingTurn(pending);
+					abortedOrError(error);
+				}
+				return;
+			}
+			cleanupPendingTurn(pending);
+			if (outcome.kind === "error") abortedOrError(outcome.error);
+			else if (outcome.result.kind === "aborted") writer.fail("aborted", "Request was aborted");
+			else finishTurn(writer, pending.agent, outcome.result.stopReason);
+		} catch (error) {
+			cleanupPendingTurn(pending);
+			abortedOrError(error);
+		}
+	}
+
 	async function runTurn(
 		stream: AssistantMessageEventStream,
 		model: Model<Api>,
@@ -364,6 +478,28 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			return;
 		}
 		const { agent } = target;
+		const piSessionId = streamOptions?.sessionId;
+		const lastMessage = context.messages.at(-1);
+		if (lastMessage?.role === "toolResult") {
+			const pending = piSessionId ? pendingTurns.get(piSessionId) : undefined;
+			if (!pending) {
+				writer.fail("error", "No active ACP turn waiting for tool results.");
+				return;
+			}
+			const results: ToolResultMessage[] = [];
+			for (let i = context.messages.length - 1; i >= 0; i--) {
+				const candidate = context.messages[i];
+				if (candidate?.role !== "toolResult") break;
+				results.push(candidate as ToolResultMessage);
+			}
+			for (const result of results.reverse()) {
+				pending.handoff.complete(result.toolCallId, toMcpToolResult(result));
+			}
+			stream.push({ type: "start", partial: message });
+			await driveTurn(pending, writer, signal);
+			return;
+		}
+
 		const instructions = getCurrentSystemPrompt(context.messages).trim() || undefined;
 		const promptText = latestUserPrompt(context.messages);
 		if (promptText === null) {
@@ -372,16 +508,25 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		}
 		// An unidentified caller cannot safely share conversation state.
 		const requestCwd = (streamOptions as (StreamOptions & { cwd?: string }) | undefined)?.cwd;
-		const transient = !streamOptions?.sessionId;
-		log?.(`runTurn: agent=${agent.id} sessionId=${streamOptions?.sessionId ?? "<transient>"} requestCwd=${requestCwd ?? "<none>"}`);
+		const transient = !piSessionId;
+		log?.(`runTurn: agent=${agent.id} sessionId=${piSessionId ?? "<transient>"} requestCwd=${requestCwd ?? "<none>"}`);
 		const acp = transient
 			? createClient(agent, requestCwd ?? cwd)
-			: getClient(agent, streamOptions?.sessionId, requestCwd);
+			: getClient(agent, piSessionId, requestCwd);
 		if (activeClients.has(acp)) {
 			writer.fail("error", `Another ${agent.name} prompt is already in flight`);
 			return;
 		}
 		activeClients.add(acp);
+		const tools = getCurrentTools(context.messages);
+		let bridge: McpBridge | undefined;
+		if (tools.length > 0) {
+			bridge = piSessionId ? (sessionBridges.get(piSessionId) ?? new McpBridge()) : new McpBridge();
+			if (piSessionId) sessionBridges.set(piSessionId, bridge);
+			bridge.setTools(tools);
+		}
+		let handoff: ToolHandoff | undefined;
+		let handedOffToDrive = false;
 		try {
 			const abortedOrError = (error: unknown): void => {
 				if (signal?.aborted) writer.fail("aborted", "Request was aborted");
@@ -392,7 +537,8 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			// Setup failures (spawn, handshake, session) end the stream before `start`.
 			let sessionId: string;
 			try {
-				sessionId = await acp.ensureSession({ signal, instructions });
+				const mcpServers = bridge ? [await bridge.serverConfig()] : undefined;
+				sessionId = await acp.ensureSession({ signal, instructions, mcpServers });
 				await applySettings(acp, agent, sessionId, target.modelId, model, streamOptions);
 			} catch (error) {
 				abortedOrError(error);
@@ -400,15 +546,24 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			}
 
 			stream.push({ type: "start", partial: message });
-			const renderTool = createToolRenderer((text) => writer.append("text", text));
 			const onProviderStreamEvent = streamOptions?.onProviderStreamEvent;
-			try {
-				const text = instructions && !acp.info?.supportsSystemPrompt && acp.isFirstPrompt
-					? `Instructions for this conversation (provided by the client):\n\n${instructions}\n\nUser request:\n\n${promptText}`
-					: promptText;
-				const defaultPayload = { sessionId, prompt: [{ type: "text", text }] };
-				const payload = (await streamOptions?.onPayload?.(defaultPayload, model)) ?? defaultPayload;
-				const result = await acp.prompt({
+			handoff = new ToolHandoff();
+			bridge?.setHandoff(handoff, signal);
+			const text = instructions && !acp.info?.supportsSystemPrompt && acp.isFirstPrompt
+				? `Instructions for this conversation (provided by the client):\n\n${instructions}\n\nUser request:\n\n${promptText}`
+				: promptText;
+			const defaultPayload = { sessionId, prompt: [{ type: "text", text }] };
+			const payload = (await streamOptions?.onPayload?.(defaultPayload, model)) ?? defaultPayload;
+			const pending: PendingTurn = {
+				acp,
+				agent,
+				piSessionId,
+				bridge,
+				handoff,
+				transient,
+				bufferedUpdates: [],
+				sink: null,
+				promptPromise: acp.prompt({
 					sessionId,
 					payload,
 					signal,
@@ -420,19 +575,25 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 							);
 						}),
 					onUpdate: (update) => {
-						if (update.type === "agent_message_chunk") writer.append("text", update.text);
-						else if (update.type === "agent_thought_chunk") writer.append("thinking", update.text);
-						else renderTool(update);
+						if (pending.sink) pending.sink(update);
+						else pending.bufferedUpdates.push(update);
 					},
-				});
-				if (result.kind === "aborted") writer.fail("aborted", "Request was aborted");
-				else finishTurn(writer, agent, result.stopReason);
-			} catch (error) {
-				abortedOrError(error);
-			}
+				}),
+			};
+			handedOffToDrive = true;
+			await driveTurn(pending, writer, signal);
 		} finally {
-			activeClients.delete(acp);
-			if (transient) acp.dispose();
+			if (!handedOffToDrive) {
+				if (handoff) {
+					bridge?.clearHandoff(handoff);
+					handoff.close();
+				}
+				activeClients.delete(acp);
+				if (transient) {
+					acp.dispose();
+					bridge?.close();
+				}
+			}
 		}
 	}
 
@@ -549,6 +710,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			return (await client?.currentCommands()) ?? [];
 		},
 		dispose(): void {
+			for (const pending of pendingTurns.values()) pending.handoff.close("Provider disposed");
+			pendingTurns.clear();
+			for (const bridge of sessionBridges.values()) bridge.close();
+			sessionBridges.clear();
 			for (const client of clients.values()) client.dispose();
 			clients.clear();
 			for (const owned of sessionClients.values()) for (const client of owned.values()) client.dispose();
