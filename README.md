@@ -162,8 +162,11 @@ Global keys:
   subagent started in a different directory or worktree must not be assumed to
   run the ACP agent there.
 - No ACP client capabilities (`fs`, `terminal`) are offered, so agents use
-  their own file and terminal tools. Other agent→client requests get
-  method-not-found.
+  their own file and terminal tools. When the Pi session has tools, the provider
+  also attaches a session-scoped `pi` MCP server (`mcpServers`) so the agent
+  can invoke Pi's tools (`mcp_pi_*`), which obey Pi's tool allowlist; however,
+  `agy acp` and `codex-acp` do not provide a way to disable their own built-in
+  tools. Other agent→client requests get method-not-found.
 - Of Pi's stream hooks, `onPayload` and `onProviderStreamEvent` are honored.
   `onResponse` is HTTP-specific and not called.
 
