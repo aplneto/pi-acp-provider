@@ -119,6 +119,10 @@ async function handlePrompt(message) {
 		update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: text.slice(5) } });
 		return turn.finish("end_turn");
 	}
+	if (text.startsWith("COMMAND ")) {
+		update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: [{ name: text.slice(8), description: "Session command" }] });
+		return turn.finish("end_turn");
+	}
 	if (text.startsWith("BRIDGE ")) {
 		const response = await serverRequest("probe/tool", { sessionId, input: text.slice(7) });
 		if (turn.finished) return;

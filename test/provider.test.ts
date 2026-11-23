@@ -132,6 +132,19 @@ test("concurrent Pi sessions using the same ACP agent get independent results", 
 	assert.equal(messageText(second.message), "beta");
 });
 
+test("unidentified calls use isolated, one-turn ACP sessions", async () => {
+	const handle = makeProvider();
+	const model = firstModel(handle);
+	const run = async (text: string) => (await collect(handle.provider.streamSimple(model, userContext(`ECHO ${text}`), {}))).at(-1);
+	const [first, second] = await Promise.all([run("alpha"), run("beta")]);
+	assert.ok(first?.type === "done" && second?.type === "done");
+	assert.equal(messageText(first.message), "alpha");
+	assert.equal(messageText(second.message), "beta");
+	const again = await lastEvent(handle, "hello");
+	assert.ok(again?.type === "done");
+	assert.match(messageText(again.message), /#0/);
+});
+
 for (const supportsSystemPrompt of [false, true]) {
 	test(`directives persist across turns (system prompt support: ${supportsSystemPrompt})`, async () => {
 		const handle = makeProvider([fakeAgent({ env: { FAKE_DIRECTIVE: "1", ...(supportsSystemPrompt ? { FAKE_SYSTEM_PROMPT: "1" } : {}) } })]);
@@ -181,6 +194,16 @@ test("session cleanup replaces only the ended session's client", async () => {
 	assert.ok(restarted?.type === "done" && continued?.type === "done");
 	assert.match(messageText(restarted.message), /#0/);
 	assert.match(messageText(continued.message), /#1/);
+});
+
+test("slash command lookup uses the owning Pi session", async () => {
+	const handle = makeProvider();
+	const model = firstModel(handle);
+	const run = async (id: string, name: string) =>
+		collect(handle.provider.streamSimple(model, userContext(`COMMAND ${name}`), { sessionId: id }));
+	await Promise.all([run("command-one", "alpha"), run("command-two", "beta")]);
+	assert.deepEqual((await handle.commands("fake", "command-one")).map((c) => c.name), ["alpha"]);
+	assert.deepEqual((await handle.commands("fake", "command-two")).map((c) => c.name), ["beta"]);
 });
 
 test("aborting one Pi session does not abort another session", async () => {
@@ -467,8 +490,8 @@ test("agents without model support list only their default model after discovery
 
 test("an agent slash command sent as the prompt returns the agent's output", async () => {
 	const handle = makeProvider();
-	const last = await lastEvent(handle, "/context");
+	const last = (await collect(handle.provider.streamSimple(firstModel(handle), userContext("/context"), { sessionId: "command-session" }))).at(-1);
 	assert.ok(last?.type === "done");
 	assert.equal(messageText(last.message), "context: 42%");
-	assert.deepEqual((await handle.commands("fake")).map((command) => command.name), ["context", "session"]);
+	assert.deepEqual((await handle.commands("fake", "command-session")).map((command) => command.name), ["context", "session"]);
 });

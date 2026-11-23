@@ -36,6 +36,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	const log = config.debug ? (message: string) => process.stderr.write(`[acp] ${message}\n`) : undefined;
 
 	let ui: PermissionUi | undefined;
+	let currentSessionId: string | undefined;
 	const handle = createAcpProvider({
 		config,
 		log,
@@ -49,7 +50,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
 		pi.registerCommand(agent.id, {
 			description: `Run a ${agent.name} slash command`,
 			getArgumentCompletions: async (prefix) => {
-				const items = (await handle.commands(agent.id))
+				const items = (await handle.commands(agent.id, currentSessionId))
 					.filter((command) => command.name.startsWith(prefix.trim()))
 					.map((command) => ({
 						value: command.name,
@@ -60,7 +61,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
 			},
 			handler: async (args, ctx) => {
 				if (!args.trim()) {
-					const commands = await handle.commands(agent.id);
+					const commands = await handle.commands(agent.id, ctx.sessionManager.getSessionId());
 					const list = commands.map((command) => `/${agent.id} ${command.name}  ${command.description}`).join("\n");
 					ctx.ui.notify(list || `${agent.name} has not advertised any commands yet.`, "info");
 					return;
@@ -83,6 +84,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (event, ctx) => {
 		// A new Pi session (`/new`, `/resume`, `/fork`) gets new ACP sessions.
 		handle.resetSession(ctx.cwd);
+		currentSessionId = ctx.sessionManager.getSessionId();
 		ui = ctx.hasUI ? ctx.ui : undefined;
 		if (event.reason === "startup" && config.agents.length === 0 && ctx.hasUI) {
 			ctx.ui.notify(`ACP provider: no agents configured. Add "acp.agents" to ${settingsPath}.`, "warning");
@@ -90,6 +92,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	});
 	pi.on("session_shutdown", () => {
 		ui = undefined;
+		currentSessionId = undefined;
 		handle.dispose();
 	});
 }

@@ -110,8 +110,8 @@ Global keys:
   shared by all agents, cover exits without a session shutdown. A crashed
   agent is respawned with a fresh session on the next prompt.
 - **Session mapping**: one ACP session per Pi session per agent when Pi supplies
-  a session ID. Calls without an ID share the legacy per-agent session and
-  cannot safely represent independent concurrent conversations. Each Pi model
+  a session ID. Calls without an ID use an isolated process for one turn and
+  cannot continue an earlier ACP conversation. Each Pi model
   turn sends only the new user message, because the agent keeps conversation
   history on its side. Image attachments are noted but not forwarded.
 - **Instructions**: Pi's current system instructions are sent when the ACP
@@ -155,6 +155,10 @@ Global keys:
 - `/resume` and `/fork` start a fresh ACP session. Prior Pi history is not
   replayed to the agent, and switching models mid-conversation does not carry
   history across agents.
+- ACP processes use the provider extension's session working directory. Pi's
+  provider stream does not expose a child session's working directory, so a
+  subagent started in a different directory or worktree must not be assumed to
+  run the ACP agent there.
 - No ACP client capabilities (`fs`, `terminal`) are offered, so agents use
   their own file and terminal tools. Other agent→client requests get
   method-not-found.

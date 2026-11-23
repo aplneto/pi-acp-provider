@@ -134,7 +134,7 @@ export interface AcpProviderHandle {
 	/** Id of the agent that serves `modelId` (`<agent id>` or `<agent id>/<model id>`), if any. */
 	agentFor(modelId: string): string | undefined;
 	/** Slash commands the agent's current session advertised; empty until it has started. */
-	commands(agentId: string): Promise<AcpCommand[]>;
+	commands(agentId: string, sessionId?: string): Promise<AcpCommand[]>;
 	/** Kills all agent processes; the provider respawns them if used again. */
 	dispose(): void;
 }
@@ -274,9 +274,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		options.config.agents.flatMap((agent) => discovered.get(agent.id) ?? agentModels(agent));
 	let models = buildModels();
 	let cwd = process.cwd();
-	/** Legacy callers and model discovery, which have no Pi session identifier. */
+	/** Model discovery is independent of conversational clients. */
 	const clients = new Map<string, AcpClient>();
 	const sessionClients = new Map<string, Map<string, AcpClient>>();
+	const activeClients = new Set<AcpClient>();
 	let unregisterCleanup: (() => void) | undefined;
 
 	const answerServerRequest = async (
@@ -294,6 +295,14 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		return { outcome: signal?.aborted ? { outcome: "cancelled" } : outcome };
 	};
 
+	const createClient = (agent: AcpAgentConfig): AcpClient => new AcpClient({
+		agent,
+		cwd,
+		handshakeTimeoutMs: options.config.handshakeTimeoutMs,
+		onServerRequest: (request) => answerServerRequest(agent, request),
+		log: log && ((message) => log(`${agent.id}: ${message}`)),
+	});
+
 	const getClient = (agent: AcpAgentConfig, piSessionId?: string): AcpClient => {
 		let owned = clients;
 		if (piSessionId) {
@@ -309,13 +318,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		}
 		let client = owned.get(agent.id);
 		if (!client) {
-			client = new AcpClient({
-				agent,
-				cwd,
-				handshakeTimeoutMs: options.config.handshakeTimeoutMs,
-				onServerRequest: (request) => answerServerRequest(agent, request),
-				log: log && ((message) => log(`${agent.id}: ${message}`)),
-			});
+			client = createClient(agent);
 			owned.set(agent.id, client);
 		}
 		return client;
@@ -351,53 +354,65 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			writer.fail("error", `No user message found to send to ${agent.name}.`);
 			return;
 		}
-		const acp = getClient(agent, streamOptions?.sessionId);
-		const abortedOrError = (error: unknown): void => {
-			if (signal?.aborted) writer.fail("aborted", "Request was aborted");
-			else if (error instanceof AcpRpcError && error.code === ACP_AUTH_REQUIRED) writer.fail("error", authHint(agent, acp.info));
-			else writer.fail("error", errorMessage(error));
-		};
-
-		// Setup failures (spawn, handshake, session) end the stream before `start`.
-		let sessionId: string;
-		try {
-			sessionId = await acp.ensureSession({ signal, instructions });
-			await applySettings(acp, agent, sessionId, target.modelId, model, streamOptions);
-		} catch (error) {
-			abortedOrError(error);
+		// An unidentified caller cannot safely share conversation state.
+		const transient = !streamOptions?.sessionId;
+		const acp = transient ? createClient(agent) : getClient(agent, streamOptions?.sessionId);
+		if (activeClients.has(acp)) {
+			writer.fail("error", `Another ${agent.name} prompt is already in flight`);
 			return;
 		}
-
-		stream.push({ type: "start", partial: message });
-		const renderTool = createToolRenderer((text) => writer.append("text", text));
-		const onProviderStreamEvent = streamOptions?.onProviderStreamEvent;
+		activeClients.add(acp);
 		try {
-			const text = instructions && !acp.info?.supportsSystemPrompt && acp.isFirstPrompt
-				? `Instructions for this conversation (provided by the client):\n\n${instructions}\n\nUser request:\n\n${promptText}`
-				: promptText;
-			const defaultPayload = { sessionId, prompt: [{ type: "text", text }] };
-			const payload = (await streamOptions?.onPayload?.(defaultPayload, model)) ?? defaultPayload;
-			const result = await acp.prompt({
-				sessionId,
-				payload,
-				signal,
-				onRawUpdate:
-					onProviderStreamEvent &&
-					((params) => {
-						Promise.resolve(onProviderStreamEvent(params, model)).catch((error: unknown) =>
-							log?.(`onProviderStreamEvent failed: ${errorMessage(error)}`),
-						);
-					}),
-				onUpdate: (update) => {
-					if (update.type === "agent_message_chunk") writer.append("text", update.text);
-					else if (update.type === "agent_thought_chunk") writer.append("thinking", update.text);
-					else renderTool(update);
-				},
-			});
-			if (result.kind === "aborted") writer.fail("aborted", "Request was aborted");
-			else finishTurn(writer, agent, result.stopReason);
-		} catch (error) {
-			abortedOrError(error);
+			const abortedOrError = (error: unknown): void => {
+				if (signal?.aborted) writer.fail("aborted", "Request was aborted");
+				else if (error instanceof AcpRpcError && error.code === ACP_AUTH_REQUIRED) writer.fail("error", authHint(agent, acp.info));
+				else writer.fail("error", errorMessage(error));
+			};
+
+			// Setup failures (spawn, handshake, session) end the stream before `start`.
+			let sessionId: string;
+			try {
+				sessionId = await acp.ensureSession({ signal, instructions });
+				await applySettings(acp, agent, sessionId, target.modelId, model, streamOptions);
+			} catch (error) {
+				abortedOrError(error);
+				return;
+			}
+
+			stream.push({ type: "start", partial: message });
+			const renderTool = createToolRenderer((text) => writer.append("text", text));
+			const onProviderStreamEvent = streamOptions?.onProviderStreamEvent;
+			try {
+				const text = instructions && !acp.info?.supportsSystemPrompt && acp.isFirstPrompt
+					? `Instructions for this conversation (provided by the client):\n\n${instructions}\n\nUser request:\n\n${promptText}`
+					: promptText;
+				const defaultPayload = { sessionId, prompt: [{ type: "text", text }] };
+				const payload = (await streamOptions?.onPayload?.(defaultPayload, model)) ?? defaultPayload;
+				const result = await acp.prompt({
+					sessionId,
+					payload,
+					signal,
+					onRawUpdate:
+						onProviderStreamEvent &&
+						((params) => {
+							Promise.resolve(onProviderStreamEvent(params, model)).catch((error: unknown) =>
+								log?.(`onProviderStreamEvent failed: ${errorMessage(error)}`),
+							);
+						}),
+					onUpdate: (update) => {
+						if (update.type === "agent_message_chunk") writer.append("text", update.text);
+						else if (update.type === "agent_thought_chunk") writer.append("thinking", update.text);
+						else renderTool(update);
+					},
+				});
+				if (result.kind === "aborted") writer.fail("aborted", "Request was aborted");
+				else finishTurn(writer, agent, result.stopReason);
+			} catch (error) {
+				abortedOrError(error);
+			}
+		} finally {
+			activeClients.delete(acp);
+			if (transient) acp.dispose();
 		}
 	}
 
@@ -502,7 +517,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			for (const client of clients.values()) client.resetSession(nextCwd);
 		},
 		agentFor: (modelId) => parseModelId(modelId, agents)?.agent.id,
-		commands: async (agentId) => (await clients.get(agentId)?.currentCommands()) ?? [],
+		commands: async (agentId, sessionId) => {
+			const client = (sessionId && sessionClients.get(sessionId)?.get(agentId)) || clients.get(agentId);
+			return (await client?.currentCommands()) ?? [];
+		},
 		dispose(): void {
 			for (const client of clients.values()) client.dispose();
 			clients.clear();

@@ -68,7 +68,7 @@ test("agents from settings.json become acp models", () =>
 			);
 			assert.ok(await provider.auth.apiKey?.resolve({}), "ambient auth must report the provider as configured");
 
-			handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, { cwd: "/tmp", hasUI: false });
+			handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, { cwd: "/tmp", hasUI: false, sessionManager: { getSessionId: () => "session" } });
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, undefined);
 		},
 	));
@@ -79,7 +79,7 @@ test("no configured agents warns once at startup", () =>
 		acpExtension(pi);
 		assert.deepEqual((providers[0] as { getModels: () => unknown[] }).getModels(), []);
 		const notices: string[] = [];
-		const ctx = { cwd: "/tmp", hasUI: true, ui: { notify: (message: string) => notices.push(message) } };
+		const ctx = { cwd: "/tmp", hasUI: true, sessionManager: { getSessionId: () => "session" }, ui: { notify: (message: string) => notices.push(message) } };
 		handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
 		handlers.get("session_start")?.({ type: "session_start", reason: "new" }, ctx);
 		assert.equal(notices.length, 1);
@@ -112,7 +112,7 @@ test("each agent gets a command that completes and runs its advertised slash com
 			]);
 
 			const notes: string[] = [];
-			const ctx = { model: undefined, ui: { notify: (text: string) => notes.push(text) } };
+			const ctx = { model: undefined, sessionManager: { getSessionId: () => "session" }, ui: { notify: (text: string) => notes.push(text) } };
 			await command.handler("", ctx);
 			assert.match(notes[0] ?? "", /\/fake context  Show context usage/);
 			await command.handler("session info", ctx);
