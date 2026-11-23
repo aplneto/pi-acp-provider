@@ -147,6 +147,10 @@ Global keys:
 
 ### Known limitations
 
+- The Claude ACP adapter's system-instruction forwarding still needs an
+  authenticated live directive test; the previous attempt failed because its
+  OAuth session had expired. Codex ACP and Antigravity passed live directive
+  probes, using system-prompt and first-user-message delivery respectively.
 - No image input (prompts are sent as text only).
 - `/resume` and `/fork` start a fresh ACP session. Prior Pi history is not
   replayed to the agent, and switching models mid-conversation does not carry
