@@ -187,5 +187,8 @@ real agent or network is needed.
 - `src/acp.ts`: ACP v1 / JSON-RPC wire types and boundary parsers
 - `src/acp-client.ts`: child process, NDJSON transport, handshake, sessions, auth
 - `src/provider.ts`: the Pi `Provider` (agents and their discovered models), model and thinking-level selection, and event translation
+- `src/tool-handoff.ts`: per-turn promise queue bridging ACP tool calls to Pi's agent loop
+- `src/mcp-bridge.ts`: session-scoped authenticated HTTP MCP server exposing Pi's current tools
+- `src/mcp-stdio-shim.mjs`: stdio-to-HTTP JSON-RPC shim for ACP adapters using stdio `mcpServers`
 - `src/config.ts`: settings and env resolution
 - `src/index.ts`: extension factory (`pi.registerProvider`, lifecycle wiring)

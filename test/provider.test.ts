@@ -532,6 +532,16 @@ test("sessions keep independent cwds across resetSession and non-LIFO disposeSes
 	}
 });
 
+test("failed ACP tool_call_update renders failure mark with tracked title", async () => {
+	const handle = makeProvider();
+	const last = await lastEvent(handle, "FAILED_TOOL");
+	assert.ok(last?.type === "done");
+	const text = messageText(last.message);
+	assert.match(text, /⚙️ Executing \[read secret\.txt\]\.\.\./);
+	assert.match(text, /✗ read secret\.txt: ENOENT: no such file/);
+	handle.dispose();
+});
+
 test("streamOptions.cwd overrides the session cwd for identified and transient calls", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-acp-stream-cwd-"));
 	const dirA = join(root, "a");

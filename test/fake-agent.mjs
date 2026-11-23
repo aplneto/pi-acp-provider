@@ -161,6 +161,16 @@ async function handlePrompt(message) {
 		update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: [{ name: text.slice(8), description: "Session command" }] });
 		return turn.finish("end_turn");
 	}
+	if (text.includes("FAILED_TOOL")) {
+		update(sessionId, { sessionUpdate: "tool_call", toolCallId: "tf1", title: "read secret.txt", kind: "read", status: "pending" });
+		update(sessionId, {
+			sessionUpdate: "tool_call_update",
+			toolCallId: "tf1",
+			status: "failed",
+			content: [{ type: "content", content: { type: "text", text: "ENOENT: no such file" } }],
+		});
+		return turn.finish("end_turn");
+	}
 	if (text.startsWith("BRIDGE ")) {
 		const response = await serverRequest("probe/tool", { sessionId, input: text.slice(7) });
 		if (turn.finished) return;
