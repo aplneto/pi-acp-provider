@@ -14,7 +14,7 @@ function makeProvider() {
 		config: {
 			agents: [{ id: "fake", name: "Fake agent", command: process.execPath, args: [fakePath], env: {}, authMethod: undefined }],
 			autoApproveTools: true,
-			freshSessionOnInstructionChange: false,
+			freshSessionOnInstructionChange: "ask",
 			handshakeTimeoutMs: 8000,
 			debug: false,
 		},

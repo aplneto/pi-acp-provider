@@ -52,13 +52,15 @@ export default function acpExtension(pi: ExtensionAPI): void {
 			ui.notify(message, "warning");
 			const continueChoice = "Continue existing session (keep prior instructions)";
 			const freshChoice = "Start a fresh ACP session (apply new instructions)";
+			const restartChoice = "Restart ACP agent process (kill and start fresh)";
 			const abortChoice = "Cancel (start a new Pi session instead)";
 			const chosen = await ui.select(
 				`${agent.name} instructions changed on restore`,
-				[continueChoice, freshChoice, abortChoice],
+				[continueChoice, freshChoice, restartChoice, abortChoice],
 				signal ? { signal } : undefined,
 			);
 			if (chosen === freshChoice) return "fresh";
+			if (chosen === restartChoice) return "restart";
 			if (chosen === continueChoice) return "continue";
 			return "abort";
 		},

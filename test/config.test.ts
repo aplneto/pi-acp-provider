@@ -6,10 +6,16 @@ test("defaults apply when nothing is configured", () => {
 	assert.deepEqual(resolveConfig({ settings: {}, env: {} }), {
 		agents: [],
 		autoApproveTools: false,
-		freshSessionOnInstructionChange: false,
+		freshSessionOnInstructionChange: "ask",
 		handshakeTimeoutMs: 30_000,
 		debug: false,
 	});
+});
+
+test("freshSessionOnInstructionChange accepts modes and boolean compatibility", () => {
+	assert.equal(resolveConfig({ settings: parseSettings({ freshSessionOnInstructionChange: true }), env: {} }).freshSessionOnInstructionChange, "fresh");
+	assert.equal(resolveConfig({ settings: parseSettings({ freshSessionOnInstructionChange: "restart" }), env: {} }).freshSessionOnInstructionChange, "restart");
+	assert.equal(resolveConfig({ settings: parseSettings({ freshSessionOnInstructionChange: "continue" }), env: {} }).freshSessionOnInstructionChange, "continue");
 });
 
 test("agents resolve with defaults for optional fields", () => {

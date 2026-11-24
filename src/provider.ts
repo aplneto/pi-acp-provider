@@ -129,7 +129,7 @@ export function fingerprintInstructions(instructions: string | undefined): strin
 	return createHash("sha256").update(instructions ?? "").digest("hex");
 }
 
-export type InstructionChangeAction = "continue" | "fresh" | "abort";
+export type InstructionChangeAction = "continue" | "fresh" | "restart" | "abort";
 
 export interface AcpProviderOptions {
 	config: AcpProviderConfig;
@@ -542,7 +542,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		const requestCwd = (streamOptions as (StreamOptions & { cwd?: string }) | undefined)?.cwd;
 		const transient = !piSessionId;
 		log?.(`runTurn: agent=${agent.id} sessionId=${piSessionId ?? "<transient>"} requestCwd=${requestCwd ?? "<none>"}`);
-		const acp = transient
+		let acp = transient
 			? createClient(agent, requestCwd ?? cwd)
 			: getClient(agent, piSessionId, requestCwd);
 		if (activeClients.has(acp)) {
@@ -582,22 +582,39 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 						const reason = resume.instructionsHash === undefined
 							? "Saved ACP session has no instruction fingerprint"
 							: "ACP session instructions changed since the session was saved";
-						if (options.config.freshSessionOnInstructionChange) {
-							resumeSessionId = undefined;
-							const msg = `${reason}; starting a fresh ${agent.name} session to apply current instructions.`;
-							log?.(msg);
-							options.onWarning?.(msg, piSessionId);
-						} else {
+						const mode = options.config.freshSessionOnInstructionChange;
+						let action: InstructionChangeAction;
+						if (mode === "ask") {
 							const msg = `${reason}; ${agent.name} does not support updating system instructions on restore, so prior instructions may remain active.`;
 							log?.(msg);
-							const action = options.onInstructionChange
+							action = options.onInstructionChange
 								? await options.onInstructionChange({ agent, message: msg, signal, piSessionId })
 								: (options.onWarning?.(msg, piSessionId), "continue");
-							if (action === "fresh") {
-								resumeSessionId = undefined;
-							} else if (action === "abort") {
-								throw new Error("ACP session instructions changed; start a new Pi session to apply them.");
-							}
+						} else {
+							action = mode;
+							const detail =
+								mode === "fresh"
+									? `starting a fresh ${agent.name} session to apply current instructions.`
+									: mode === "restart"
+										? `restarting ${agent.name} with a fresh session to apply current instructions.`
+										: `${agent.name} does not support updating system instructions on restore, so prior instructions may remain active.`;
+							const msg = `${reason}; ${detail}`;
+							log?.(msg);
+							options.onWarning?.(msg, piSessionId);
+						}
+						if (action === "fresh") {
+							resumeSessionId = undefined;
+						} else if (action === "restart") {
+							resumeSessionId = undefined;
+							activeClients.delete(acp);
+							if (piSessionId) sessionClients.get(piSessionId)?.delete(agent.id);
+							acp.dispose();
+							acp = transient
+								? createClient(agent, requestCwd ?? cwd)
+								: getClient(agent, piSessionId, requestCwd);
+							activeClients.add(acp);
+						} else if (action === "abort") {
+							throw new Error("ACP session instructions changed; start a new Pi session to apply them.");
 						}
 					}
 				}

@@ -97,7 +97,7 @@ Global keys:
 | Key | Env override | Default | Meaning |
 |---|---|---|---|
 | `autoApproveTools` | `ACP_AUTO_APPROVE` | `false` | When `false` (default), each permission request opens a select dialog (TUI/RPC) or is denied (background/print/JSON mode). Set `true` to auto-approve (`allow_once`). |
-| `freshSessionOnInstructionChange` | | `false` | When restoring a session on an agent without `systemPrompt` support and instructions changed (or no fingerprint was saved), `false` warns and restores the saved session; `true` warns and starts a fresh ACP session. |
+| `freshSessionOnInstructionChange` | | `"ask"` | Restore behavior when instructions changed (or lack a fingerprint) on an agent without `systemPrompt` support: `"ask"` (prompt interactively, or warn & continue in background), `"continue"` (warn & keep existing session), `"fresh"`/`true` (warn & start a fresh ACP session), or `"restart"` (warn, kill agent process, and start a new one). |
 | `handshakeTimeoutMs` | | `30000` | Milliseconds to wait for `initialize`, `session/new`, `session/resume`, `session/load`, and model or thinking-level changes. |
 | | `ACP_DEBUG=1` | off | Wire diagnostics on stderr. |
 
@@ -123,12 +123,12 @@ Global keys:
   (ignoring replayed `session/update` history), resending `systemPrompt` in
   `append` mode when advertised. If the agent does not advertise
   `systemCapabilities.systemPrompt` and the instruction fingerprint is missing
-  or changed, the provider emits a warning. In interactive sessions (when
-  `freshSessionOnInstructionChange` is `false`), it asks whether to continue the
-  existing session, start a fresh ACP session with the new instructions, or
-  cancel to start a new Pi session; in non-interactive sessions it warns and
-  continues (`freshSessionOnInstructionChange: true` always warns and starts a
-  fresh ACP session). `/fork` starts a fresh ACP session.
+  or changed, the provider emits a warning and follows
+  `freshSessionOnInstructionChange` (`"ask"` by default: prompts to continue,
+  start a fresh ACP session, restart the agent process, or cancel to start a
+  new Pi session; `"continue"` warns and keeps the saved session; `"fresh"` /
+  `true` warns and starts a fresh ACP session; `"restart"` warns, kills the
+  agent process, and starts a new one). `/fork` starts a fresh ACP session.
 - **Instructions**: Pi's current system instructions are sent when the ACP
   session starts. Agents advertising `sessionCapabilities.systemPrompt` receive
   them in `append` mode. Otherwise they are prepended to the first user prompt;
