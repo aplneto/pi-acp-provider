@@ -25,6 +25,8 @@ export interface AcpAgentConfig {
 export interface AcpProviderConfig {
 	agents: AcpAgentConfig[];
 	autoApproveTools: boolean;
+	/** Start a fresh ACP session instead of warning when instructions change on an agent without `systemPrompt` support. */
+	freshSessionOnInstructionChange: boolean;
 	/** Bounds `initialize`, `session/new`, and session setting changes. */
 	handshakeTimeoutMs: number;
 	/** Wire diagnostics on stderr (`ACP_DEBUG`). */
@@ -37,11 +39,13 @@ export type AcpAgentSettings = Partial<Omit<AcpAgentConfig, "id" | "command">> &
 export type AcpSettings = Partial<{
 	agents: Record<string, AcpAgentSettings>;
 	autoApproveTools: boolean;
+	freshSessionOnInstructionChange: boolean;
 	handshakeTimeoutMs: number;
 }>;
 
 const DEFAULTS = {
 	autoApproveTools: false,
+	freshSessionOnInstructionChange: false,
 	handshakeTimeoutMs: 30_000,
 } as const;
 
@@ -78,6 +82,9 @@ export function parseSettings(value: unknown): AcpSettings {
 		settings.agents = Object.fromEntries(agents);
 	}
 	if (typeof value.autoApproveTools === "boolean") settings.autoApproveTools = value.autoApproveTools;
+	if (typeof value.freshSessionOnInstructionChange === "boolean") {
+		settings.freshSessionOnInstructionChange = value.freshSessionOnInstructionChange;
+	}
 	const timeout = value.handshakeTimeoutMs;
 	if (typeof timeout === "number" && Number.isFinite(timeout) && timeout > 0) settings.handshakeTimeoutMs = timeout;
 	return settings;
@@ -125,6 +132,8 @@ export function resolveConfig({
 		})),
 		autoApproveTools:
 			parseBooleanFlag(env.ACP_AUTO_APPROVE) ?? settings.autoApproveTools ?? DEFAULTS.autoApproveTools,
+		freshSessionOnInstructionChange:
+			settings.freshSessionOnInstructionChange ?? DEFAULTS.freshSessionOnInstructionChange,
 		handshakeTimeoutMs: settings.handshakeTimeoutMs ?? DEFAULTS.handshakeTimeoutMs,
 		debug: parseBooleanFlag(env.ACP_DEBUG) ?? false,
 	};

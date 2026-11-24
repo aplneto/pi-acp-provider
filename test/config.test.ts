@@ -6,6 +6,7 @@ test("defaults apply when nothing is configured", () => {
 	assert.deepEqual(resolveConfig({ settings: {}, env: {} }), {
 		agents: [],
 		autoApproveTools: false,
+		freshSessionOnInstructionChange: false,
 		handshakeTimeoutMs: 30_000,
 		debug: false,
 	});

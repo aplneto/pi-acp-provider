@@ -13,10 +13,10 @@ import { autoReject } from "./acp.ts";
 import { loadSettings, resolveConfig } from "./config.ts";
 import { ACP_PROVIDER_ID, createAcpProvider, type PermissionPolicy } from "./provider.ts";
 
-type PermissionUi = Pick<ExtensionUIContext, "select">;
+type SessionUi = Pick<ExtensionUIContext, "select" | "notify">;
 
 /** Asks the user via a select dialog; denies when no dialog-capable UI exists. */
-function interactivePolicy(getUi: (sessionId?: string) => PermissionUi | undefined): PermissionPolicy {
+function interactivePolicy(getUi: (sessionId?: string) => SessionUi | undefined): PermissionPolicy {
 	return async (request, { agent, signal, sessionId }) => {
 		const ui = getUi(sessionId);
 		if (!ui) return autoReject(request);
@@ -35,13 +35,16 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	const config = resolveConfig({ settings: loadSettings(settingsPath), env: process.env });
 	const log = config.debug ? (message: string) => process.stderr.write(`[acp] ${message}\n`) : undefined;
 
-	const sessionUis = new Map<string, PermissionUi>();
+	const sessionUis = new Map<string, SessionUi>();
 	let currentSessionId: string | undefined;
 	const handle = createAcpProvider({
 		config,
 		log,
 		onSessionCreated: ({ agentId, sessionId, cwd, instructionsHash }) => {
 			pi.appendEntry("acp-session", { agentId, sessionId, cwd, instructionsHash });
+		},
+		onWarning: (message, sessionId) => {
+			sessionUis.get(sessionId ?? currentSessionId ?? "")?.notify(message, "warning");
 		},
 		...(config.autoApproveTools
 			? {}

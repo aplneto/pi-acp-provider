@@ -38,9 +38,19 @@ test.afterEach(() => {
 
 function makeProvider(
 	agents: AcpAgentConfig[] = [fakeAgent()],
-	extra: Omit<AcpProviderOptions, "config"> = {},
+	extra: Omit<AcpProviderOptions, "config"> & { freshSessionOnInstructionChange?: boolean } = {},
 ): AcpProviderHandle {
-	const handle = createAcpProvider({ config: { agents, autoApproveTools: true, handshakeTimeoutMs: 8000, debug: false }, ...extra });
+	const { freshSessionOnInstructionChange = false, ...rest } = extra;
+	const handle = createAcpProvider({
+		config: {
+			agents,
+			autoApproveTools: true,
+			freshSessionOnInstructionChange,
+			handshakeTimeoutMs: 8000,
+			debug: false,
+		},
+		...rest,
+	});
 	handles.push(handle);
 	return handle;
 }
@@ -570,45 +580,70 @@ test("session/load restores session and ignores replayed history updates", async
 	handle.dispose();
 });
 
-test("session/resume and session/load resend systemPrompt when supported and match unchanged instructions", async () => {
+test("session/resume and session/load resend systemPrompt when supported without warning", async () => {
 	for (const envFlag of ["FAKE_RESUME", "FAKE_LOAD"] as const) {
-		const handle = makeProvider([
-			fakeAgent({ env: { [envFlag]: "1", FAKE_SYSTEM_PROMPT: "1", FAKE_DIRECTIVE: "1" } }),
-		]);
+		const warnings: string[] = [];
+		const handle = makeProvider(
+			[fakeAgent({ env: { [envFlag]: "1", FAKE_SYSTEM_PROMPT: "1", FAKE_DIRECTIVE: "1" } })],
+			{ onWarning: (msg) => warnings.push(msg) },
+		);
 		const model = firstModel(handle);
 		const instructions = "Follow DIRECTIVE-PROBE strictly.";
-		handle.setResumeSession("pi-sys", "fake", "sys-sess", fingerprintInstructions(instructions));
+		// Even with a changed fingerprint, systemPrompt-capable agents resend systemPrompt without warning.
+		handle.setResumeSession("pi-sys", "fake", "sys-sess", fingerprintInstructions("OLD-DIRECTIVE"));
 		const ctx = normalizeContext({ systemPrompt: instructions, messages: [{ role: "user", content: "hello", timestamp: Date.now() }] });
 		const last = (await collect(handle.provider.streamSimple(model, ctx, { sessionId: "pi-sys" }))).at(-1);
 		assert.ok(last?.type === "done");
 		assert.equal(messageText(last.message), "DIRECTIVE-PROBE acknowledged");
+		assert.deepEqual(warnings, []);
 		handle.dispose();
 	}
 });
 
-test("resuming with changed, missing, or unavailable instructions fails explicitly", async () => {
-	const handle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })]);
-	const model = firstModel(handle);
+test("resuming with changed or missing instructions warns when systemPrompt is unsupported, or starts fresh if configured", async () => {
+	const warnings: string[] = [];
+	const created: string[] = [];
+	const warnHandle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })], {
+		onWarning: (msg) => warnings.push(msg),
+		onSessionCreated: (info) => created.push(info.sessionId),
+	});
+	const model = firstModel(warnHandle);
 
-	// Changed instructions
-	handle.setResumeSession("pi-changed", "fake", "sess-1", fingerprintInstructions("DIRECTIVE-A"));
-	const changedCtx = normalizeContext({ systemPrompt: "DIRECTIVE-B", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
-	const changedErr = (await collect(handle.provider.streamSimple(model, changedCtx, { sessionId: "pi-changed" }))).at(-1);
-	assert.ok(changedErr?.type === "error");
-	assert.match(changedErr.error.errorMessage ?? "", /instructions changed/);
+	// Changed instructions -> warns and still restores saved session
+	warnHandle.setResumeSession("pi-changed", "fake", "saved-1", fingerprintInstructions("DIRECTIVE-A"));
+	const changedCtx = normalizeContext({ systemPrompt: "DIRECTIVE-B", messages: [{ role: "user", content: "ECHO kept", timestamp: Date.now() }] });
+	const changedRes = (await collect(warnHandle.provider.streamSimple(model, changedCtx, { sessionId: "pi-changed" }))).at(-1);
+	assert.ok(changedRes?.type === "done");
+	assert.equal(messageText(changedRes.message), "kept");
+	assert.equal(warnings.length, 1);
+	assert.match(warnings[0] ?? "", /instructions changed/);
 
-	// Missing fingerprint (legacy entry)
-	handle.setResumeSession("pi-missing-fp", "fake", "sess-1");
-	const missingFpErr = (await collect(handle.provider.streamSimple(model, userContext("hi"), { sessionId: "pi-missing-fp" }))).at(-1);
-	assert.ok(missingFpErr?.type === "error");
-	assert.match(missingFpErr.error.errorMessage ?? "", /missing an instruction fingerprint/);
+	// Missing fingerprint -> warns and still restores
+	warnHandle.setResumeSession("pi-missing-fp", "fake", "saved-2");
+	const missingRes = (await collect(warnHandle.provider.streamSimple(model, userContext("ECHO legacy"), { sessionId: "pi-missing-fp" }))).at(-1);
+	assert.ok(missingRes?.type === "done");
+	assert.equal(warnings.length, 2);
+	assert.match(warnings[1] ?? "", /no instruction fingerprint/);
+	assert.equal(created.length, 0);
+	warnHandle.dispose();
 
-	// Unavailable instructions (saved with instructions, resumed without)
-	handle.setResumeSession("pi-unavail", "fake", "sess-1", fingerprintInstructions("DIRECTIVE-A"));
-	const unavailErr = (await collect(handle.provider.streamSimple(model, userContext("hi"), { sessionId: "pi-unavail" }))).at(-1);
-	assert.ok(unavailErr?.type === "error");
-	assert.match(unavailErr.error.errorMessage ?? "", /instructions changed/);
-	handle.dispose();
+	// With freshSessionOnInstructionChange: true -> warns and starts a fresh ACP session with the new directive
+	const freshWarnings: string[] = [];
+	const freshCreated: string[] = [];
+	const freshHandle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1", FAKE_DIRECTIVE: "1" } })], {
+		freshSessionOnInstructionChange: true,
+		onWarning: (msg) => freshWarnings.push(msg),
+		onSessionCreated: (info) => freshCreated.push(info.sessionId),
+	});
+	freshHandle.setResumeSession("pi-fresh", "fake", "old-sess", fingerprintInstructions("DIRECTIVE-A"));
+	const freshCtx = normalizeContext({ systemPrompt: "DIRECTIVE-PROBE", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
+	const freshRes = (await collect(freshHandle.provider.streamSimple(firstModel(freshHandle), freshCtx, { sessionId: "pi-fresh" }))).at(-1);
+	assert.ok(freshRes?.type === "done");
+	assert.equal(messageText(freshRes.message), "DIRECTIVE-PROBE acknowledged");
+	assert.equal(freshWarnings.length, 1);
+	assert.match(freshWarnings[0] ?? "", /starting a fresh/);
+	assert.equal(freshCreated.length, 1);
+	freshHandle.dispose();
 });
 
 test("resuming an unsupported or missing ACP session surfaces an explicit error", async () => {

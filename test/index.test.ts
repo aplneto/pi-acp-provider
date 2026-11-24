@@ -258,9 +258,14 @@ test("extension persists acp-session entries and restores on resume", () =>
 			assert.equal(resumed.content.map((b) => b.text).join(""), "second");
 			assert.equal(entries.length, 1, "resumed session does not append a duplicate acp-session entry");
 
+			const legacyWarnings: { msg: string; level: string }[] = [];
 			const legacyCtx = {
 				cwd: "/tmp",
-				hasUI: false,
+				hasUI: true,
+				ui: {
+					notify: (msg: string, level: string) => legacyWarnings.push({ msg, level }),
+					select: async () => "Allow",
+				},
 				sessionManager: {
 					getSessionId: () => "pi-legacy",
 					getBranch: () => [{ type: "custom", customType: "acp-session", data: { agentId: "fake", sessionId: "old-sess", cwd: "/tmp" } }],
@@ -272,7 +277,9 @@ test("extension persists acp-session entries and restores on resume", () =>
 				normalizeContext({ messages: [{ role: "user", content: "ECHO legacy", timestamp: Date.now() }] }),
 				{ sessionId: "pi-legacy" },
 			).result();
-			assert.equal(legacyRes.stopReason, "error");
+			assert.equal(legacyRes.stopReason, "stop");
+			assert.equal(legacyWarnings.length, 1);
+			assert.equal(legacyWarnings[0]?.level, "warning");
 
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, startCtx);
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, resumeCtx);

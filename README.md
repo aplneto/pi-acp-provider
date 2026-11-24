@@ -97,6 +97,7 @@ Global keys:
 | Key | Env override | Default | Meaning |
 |---|---|---|---|
 | `autoApproveTools` | `ACP_AUTO_APPROVE` | `false` | When `false` (default), each permission request opens a select dialog (TUI/RPC) or is denied (background/print/JSON mode). Set `true` to auto-approve (`allow_once`). |
+| `freshSessionOnInstructionChange` | | `false` | When restoring a session on an agent without `systemPrompt` support and instructions changed (or no fingerprint was saved), `false` warns and restores the saved session; `true` warns and starts a fresh ACP session. |
 | `handshakeTimeoutMs` | | `30000` | Milliseconds to wait for `initialize`, `session/new`, `session/resume`, `session/load`, and model or thinking-level changes. |
 | | `ACP_DEBUG=1` | off | Wire diagnostics on stderr. |
 
@@ -117,13 +118,15 @@ Global keys:
 - **Session continuation & restart recovery**: the extension persists
   `acp-session` entries (with a SHA-256 instruction fingerprint, not raw
   instructions) on the Pi session branch. On `/resume`, `--continue`, or
-  `--session`, it verifies the instruction fingerprint (failing explicitly on
-  missing or changed instructions so stale directives are not reused silently)
-  and restores the saved ACP session via capability-negotiated `session/resume`
-  (preferred, without history replay) or `session/load` (ignoring replayed
-  `session/update` history), resending `systemPrompt` in `append` mode when
-  advertised. Unsupported capabilities or missing sessions surface explicit
-  errors. `/fork` starts a fresh ACP session.
+  `--session`, it restores the saved ACP session via capability-negotiated
+  `session/resume` (preferred, without history replay) or `session/load`
+  (ignoring replayed `session/update` history), resending `systemPrompt` in
+  `append` mode when advertised. If the agent does not advertise
+  `systemCapabilities.systemPrompt` and the instruction fingerprint is missing
+  or changed, the provider emits a warning—and either restores the saved
+  session (`freshSessionOnInstructionChange: false`, default) or starts a fresh
+  ACP session (`freshSessionOnInstructionChange: true`). `/fork` starts a fresh
+  ACP session.
 - **Instructions**: Pi's current system instructions are sent when the ACP
   session starts. Agents advertising `sessionCapabilities.systemPrompt` receive
   them in `append` mode. Otherwise they are prepended to the first user prompt;

@@ -141,6 +141,8 @@ export interface AcpProviderOptions {
 		cwd: string;
 		instructionsHash: string;
 	}) => void;
+	/** Called when a non-fatal warning should be surfaced to the Pi session. */
+	onWarning?: (message: string, piSessionId?: string) => void;
 	log?: ((message: string) => void) | undefined;
 }
 
@@ -562,12 +564,25 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			const resume = piSessionId ? pendingResumes.get(piSessionId)?.get(agent.id) : undefined;
 			const instructionsHash = fingerprintInstructions(instructions);
 			try {
+				let resumeSessionId = resume?.acpSessionId;
 				if (resume) {
-					if (resume.instructionsHash === undefined) {
-						throw new Error("Saved ACP session is missing an instruction fingerprint; start a new Pi session.");
-					}
-					if (resume.instructionsHash !== instructionsHash) {
-						throw new Error("ACP session instructions changed since the session was saved; start a new Pi session to apply them.");
+					const info = await acp.ensureReady(signal);
+					const missingOrChanged =
+						resume.instructionsHash === undefined || resume.instructionsHash !== instructionsHash;
+					if (missingOrChanged && !info.supportsSystemPrompt) {
+						const reason = resume.instructionsHash === undefined
+							? "Saved ACP session has no instruction fingerprint"
+							: "ACP session instructions changed since the session was saved";
+						if (options.config.freshSessionOnInstructionChange) {
+							resumeSessionId = undefined;
+							const msg = `${reason}; starting a fresh ${agent.name} session to apply current instructions.`;
+							log?.(msg);
+							options.onWarning?.(msg, piSessionId);
+						} else {
+							const msg = `${reason}; ${agent.name} does not support updating system instructions on restore, so prior instructions may remain active.`;
+							log?.(msg);
+							options.onWarning?.(msg, piSessionId);
+						}
 					}
 				}
 				const mcpServers = bridge ? [await bridge.serverConfig()] : undefined;
@@ -575,14 +590,14 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 					signal,
 					instructions,
 					mcpServers,
-					resumeSessionId: resume?.acpSessionId,
+					resumeSessionId,
 				});
 				if (piSessionId) {
 					if (resume) pendingResumes.get(piSessionId)?.delete(agent.id);
 					const sessionKey = `${piSessionId}:${agent.id}:${sessionId}`;
 					if (!knownSessions.has(sessionKey)) {
 						knownSessions.add(sessionKey);
-						if (!resume) {
+						if (!resumeSessionId) {
 							options.onSessionCreated?.({
 								piSessionId,
 								agentId: agent.id,
