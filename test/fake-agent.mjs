@@ -311,6 +311,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 				replyError(message.id, -32603, "Session not found");
 			} else {
 				const sessionId = message.params.sessionId;
+				directiveEnabled = JSON.stringify(message.params.systemPrompt ?? "").includes("DIRECTIVE-PROBE");
 				reply(message.id, { sessionId, ...sessionExtras() });
 			}
 			break;
@@ -321,6 +322,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 				replyError(message.id, -32603, "Session not found");
 			} else {
 				const sessionId = message.params.sessionId;
+				directiveEnabled = JSON.stringify(message.params.systemPrompt ?? "").includes("DIRECTIVE-PROBE");
 				update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "REPLAYED_HISTORY " } });
 				reply(message.id, { ...sessionExtras() });
 			}

@@ -115,11 +115,15 @@ Global keys:
   continue an earlier ACP conversation. Each turn sends only the newest user
   message, because the agent keeps conversation history on its side.
 - **Session continuation & restart recovery**: the extension persists
-  `acp-session` entries on the Pi session branch. On `/resume`, `--continue`,
-  or `--session`, it restores the saved ACP session via capability-negotiated
-  `session/resume` (preferred, without history replay) or `session/load`
-  (ignoring replayed `session/update` history). Unsupported capabilities or
-  missing sessions surface explicit errors. `/fork` starts a fresh ACP session.
+  `acp-session` entries (with a SHA-256 instruction fingerprint, not raw
+  instructions) on the Pi session branch. On `/resume`, `--continue`, or
+  `--session`, it verifies the instruction fingerprint (failing explicitly on
+  missing or changed instructions so stale directives are not reused silently)
+  and restores the saved ACP session via capability-negotiated `session/resume`
+  (preferred, without history replay) or `session/load` (ignoring replayed
+  `session/update` history), resending `systemPrompt` in `append` mode when
+  advertised. Unsupported capabilities or missing sessions surface explicit
+  errors. `/fork` starts a fresh ACP session.
 - **Instructions**: Pi's current system instructions are sent when the ACP
   session starts. Agents advertising `sessionCapabilities.systemPrompt` receive
   them in `append` mode. Otherwise they are prepended to the first user prompt;

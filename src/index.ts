@@ -40,8 +40,8 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	const handle = createAcpProvider({
 		config,
 		log,
-		onSessionCreated: ({ agentId, sessionId, cwd }) => {
-			pi.appendEntry("acp-session", { agentId, sessionId, cwd });
+		onSessionCreated: ({ agentId, sessionId, cwd, instructionsHash }) => {
+			pi.appendEntry("acp-session", { agentId, sessionId, cwd, instructionsHash });
 		},
 		...(config.autoApproveTools
 			? {}
@@ -100,13 +100,18 @@ export default function acpExtension(pi: ExtensionAPI): void {
 					(entry as { type?: unknown }).type === "custom" &&
 					(entry as { customType?: unknown }).customType === "acp-session"
 				) {
-					const data = (entry as { data?: { agentId?: unknown; sessionId?: unknown; cwd?: unknown } }).data;
+					const data = (entry as { data?: { agentId?: unknown; sessionId?: unknown; cwd?: unknown; instructionsHash?: unknown } }).data;
 					if (
 						typeof data?.agentId === "string" &&
 						typeof data.sessionId === "string" &&
 						(data.cwd === undefined || data.cwd === ctx.cwd)
 					) {
-						handle.setResumeSession(sessionId, data.agentId, data.sessionId);
+						handle.setResumeSession(
+							sessionId,
+							data.agentId,
+							data.sessionId,
+							typeof data.instructionsHash === "string" ? data.instructionsHash : undefined,
+						);
 					}
 				}
 			}

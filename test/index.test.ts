@@ -229,9 +229,16 @@ test("extension persists acp-session entries and restores on resume", () =>
 			const model = provider.getModels()[0];
 			const startCtx = { cwd: "/tmp", hasUI: false, sessionManager: { getSessionId: () => "pi-s1", getBranch: () => [] } };
 			handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, startCtx);
-			await provider.streamSimple(model, normalizeContext({ messages: [{ role: "user", content: "ECHO first", timestamp: Date.now() }] }), { sessionId: "pi-s1" }).result();
+			await provider.streamSimple(
+				model,
+				normalizeContext({ systemPrompt: "SECRET-PROMPT", messages: [{ role: "user", content: "ECHO first", timestamp: Date.now() }] }),
+				{ sessionId: "pi-s1" },
+			).result();
 			assert.equal(entries.length, 1);
 			assert.equal(entries[0]?.customType, "acp-session");
+			const saved = entries[0]?.data as { instructionsHash?: string };
+			assert.equal(typeof saved.instructionsHash, "string");
+			assert.ok(!JSON.stringify(saved).includes("SECRET-PROMPT"), "raw instructions must not be persisted");
 
 			const resumeCtx = {
 				cwd: "/tmp",
@@ -242,12 +249,33 @@ test("extension persists acp-session entries and restores on resume", () =>
 				},
 			};
 			handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, resumeCtx);
-			const resumed = await provider.streamSimple(model, normalizeContext({ messages: [{ role: "user", content: "ECHO second", timestamp: Date.now() }] }), { sessionId: "pi-s2" }).result();
+			const resumed = await provider.streamSimple(
+				model,
+				normalizeContext({ systemPrompt: "SECRET-PROMPT", messages: [{ role: "user", content: "ECHO second", timestamp: Date.now() }] }),
+				{ sessionId: "pi-s2" },
+			).result();
 			assert.equal(resumed.stopReason, "stop");
 			assert.equal(resumed.content.map((b) => b.text).join(""), "second");
 			assert.equal(entries.length, 1, "resumed session does not append a duplicate acp-session entry");
 
+			const legacyCtx = {
+				cwd: "/tmp",
+				hasUI: false,
+				sessionManager: {
+					getSessionId: () => "pi-legacy",
+					getBranch: () => [{ type: "custom", customType: "acp-session", data: { agentId: "fake", sessionId: "old-sess", cwd: "/tmp" } }],
+				},
+			};
+			handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, legacyCtx);
+			const legacyRes = await provider.streamSimple(
+				model,
+				normalizeContext({ messages: [{ role: "user", content: "ECHO legacy", timestamp: Date.now() }] }),
+				{ sessionId: "pi-legacy" },
+			).result();
+			assert.equal(legacyRes.stopReason, "error");
+
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, startCtx);
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, resumeCtx);
+			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, legacyCtx);
 		},
 	));

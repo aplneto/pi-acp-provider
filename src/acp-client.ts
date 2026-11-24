@@ -271,7 +271,7 @@ export class AcpClient {
 		conn.sessionInstructions = instructions;
 		if (!conn.session) {
 			const startSession = resumeSessionId
-				? this.restoreSession(conn, resumeSessionId, authenticate, mcpServers)
+				? this.restoreSession(conn, resumeSessionId, authenticate, instructions, mcpServers)
 				: this.newSession(conn, authenticate, instructions, mcpServers);
 			conn.session = startSession.catch((error: unknown) => {
 				conn.session = null;
@@ -373,6 +373,12 @@ export class AcpClient {
 		if (this.conn) this.close(this.conn, new Error("ACP client was disposed"));
 	}
 
+	private systemPromptParam(instructions?: string): Record<string, unknown> {
+		return instructions && this.agentInfo?.supportsSystemPrompt
+			? { systemPrompt: { mode: "append", content: [{ type: "text", text: instructions }] } }
+			: {};
+	}
+
 	/** `session/new`, authenticating once with the configured method if the agent asks. */
 	private async newSession(
 		conn: Connection,
@@ -385,7 +391,7 @@ export class AcpClient {
 				await this.request("session/new", {
 					cwd: this.cwd,
 					mcpServers: mcpServers ?? [],
-					...(instructions && this.agentInfo?.supportsSystemPrompt ? { systemPrompt: { mode: "append", content: [{ type: "text", text: instructions }] } } : {}),
+					...this.systemPromptParam(instructions),
 				}, this.options.handshakeTimeoutMs),
 			);
 			conn.sessions.set(sessionId, { config, initialModel: config.model?.currentValue });
@@ -409,6 +415,7 @@ export class AcpClient {
 		conn: Connection,
 		resumeSessionId: string,
 		authenticate: boolean,
+		instructions?: string,
 		mcpServers?: McpServerConfig[],
 	): Promise<string> {
 		const method = this.agentInfo?.supportsResumeSession
@@ -423,7 +430,12 @@ export class AcpClient {
 			const { sessionId, config } = parseRestoredSessionResult(
 				await this.request(
 					method,
-					{ sessionId: resumeSessionId, cwd: this.cwd, mcpServers: mcpServers ?? [] },
+					{
+						sessionId: resumeSessionId,
+						cwd: this.cwd,
+						mcpServers: mcpServers ?? [],
+						...this.systemPromptParam(instructions),
+					},
 					this.options.handshakeTimeoutMs,
 				),
 				resumeSessionId,

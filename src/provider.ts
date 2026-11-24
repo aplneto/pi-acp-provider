@@ -14,6 +14,7 @@
  * no per-turn token usage, so usage is zero.
  */
 
+import { createHash } from "node:crypto";
 import {
 	createAssistantMessageEventStream,
 	registerSessionResourceCleanup,
@@ -124,12 +125,22 @@ export type PermissionPolicy = (
 	context: { agent: AcpAgentConfig; signal: AbortSignal | undefined; sessionId?: string | undefined },
 ) => Promise<AcpPermissionOutcome>;
 
+export function fingerprintInstructions(instructions: string | undefined): string {
+	return createHash("sha256").update(instructions ?? "").digest("hex");
+}
+
 export interface AcpProviderOptions {
 	config: AcpProviderConfig;
 	/** Defaults to auto-approval. */
 	permissionPolicy?: PermissionPolicy;
 	/** Called when a brand-new ACP session is created for a Pi session. */
-	onSessionCreated?: (info: { piSessionId: string; agentId: string; sessionId: string; cwd: string }) => void;
+	onSessionCreated?: (info: {
+		piSessionId: string;
+		agentId: string;
+		sessionId: string;
+		cwd: string;
+		instructionsHash: string;
+	}) => void;
 	log?: ((message: string) => void) | undefined;
 }
 
@@ -137,8 +148,8 @@ export interface AcpProviderHandle {
 	provider: Provider;
 	/** Starts fresh ACP sessions in `cwd` on the next prompt (a new Pi session). */
 	resetSession(cwd: string, sessionId?: string): void;
-	/** Registers an ACP session ID to restore via `session/resume` or `session/load` on first turn. */
-	setResumeSession(piSessionId: string, agentId: string, acpSessionId: string): void;
+	/** Registers an ACP session ID and instruction fingerprint to restore on first turn. */
+	setResumeSession(piSessionId: string, agentId: string, acpSessionId: string, instructionsHash?: string): void;
 	/** Disposes ACP clients and state owned by `sessionId`, leaving other sessions intact. */
 	disposeSession(sessionId: string): void;
 	/** Id of the agent that serves `modelId` (`<agent id>` or `<agent id>/<model id>`), if any. */
@@ -316,7 +327,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 	const sessionClients = new Map<string, Map<string, AcpClient>>();
 	const sessionCwds = new Map<string, string>();
 	const sessionBridges = new Map<string, McpBridge>();
-	const pendingResumes = new Map<string, Map<string, string>>();
+	const pendingResumes = new Map<string, Map<string, { acpSessionId: string; instructionsHash: string | undefined }>>();
 	const knownSessions = new Set<string>();
 	const pendingTurns = new Map<string, PendingTurn>();
 	const activeClients = new Set<AcpClient>();
@@ -548,21 +559,36 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 
 			// Setup failures (spawn, handshake, session) end the stream before `start`.
 			let sessionId: string;
-			const resumeSessionId = piSessionId ? pendingResumes.get(piSessionId)?.get(agent.id) : undefined;
+			const resume = piSessionId ? pendingResumes.get(piSessionId)?.get(agent.id) : undefined;
+			const instructionsHash = fingerprintInstructions(instructions);
 			try {
+				if (resume) {
+					if (resume.instructionsHash === undefined) {
+						throw new Error("Saved ACP session is missing an instruction fingerprint; start a new Pi session.");
+					}
+					if (resume.instructionsHash !== instructionsHash) {
+						throw new Error("ACP session instructions changed since the session was saved; start a new Pi session to apply them.");
+					}
+				}
 				const mcpServers = bridge ? [await bridge.serverConfig()] : undefined;
-				sessionId = await acp.ensureSession({ signal, instructions, mcpServers, resumeSessionId });
+				sessionId = await acp.ensureSession({
+					signal,
+					instructions,
+					mcpServers,
+					resumeSessionId: resume?.acpSessionId,
+				});
 				if (piSessionId) {
-					if (resumeSessionId) pendingResumes.get(piSessionId)?.delete(agent.id);
+					if (resume) pendingResumes.get(piSessionId)?.delete(agent.id);
 					const sessionKey = `${piSessionId}:${agent.id}:${sessionId}`;
 					if (!knownSessions.has(sessionKey)) {
 						knownSessions.add(sessionKey);
-						if (!resumeSessionId) {
+						if (!resume) {
 							options.onSessionCreated?.({
 								piSessionId,
 								agentId: agent.id,
 								sessionId,
 								cwd: requestCwd ?? sessionCwds.get(piSessionId) ?? cwd,
+								instructionsHash,
 							});
 						}
 					}
@@ -731,9 +757,9 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			cwd = nextCwd;
 			for (const client of clients.values()) client.resetSession(nextCwd);
 		},
-		setResumeSession(piSessionId: string, agentId: string, acpSessionId: string): void {
-			const map = pendingResumes.get(piSessionId) ?? new Map<string, string>();
-			map.set(agentId, acpSessionId);
+		setResumeSession(piSessionId: string, agentId: string, acpSessionId: string, instructionsHash?: string): void {
+			const map = pendingResumes.get(piSessionId) ?? new Map<string, { acpSessionId: string; instructionsHash: string | undefined }>();
+			map.set(agentId, { acpSessionId, instructionsHash });
 			pendingResumes.set(piSessionId, map);
 		},
 		disposeSession,

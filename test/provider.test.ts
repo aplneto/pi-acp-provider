@@ -14,7 +14,7 @@ import type {
 	Model,
 	Api,
 } from "@earendil-works/pi-ai";
-import { createAcpProvider, type AcpProviderOptions, type AcpProviderHandle } from "../src/provider.ts";
+import { createAcpProvider, fingerprintInstructions, type AcpProviderOptions, type AcpProviderHandle } from "../src/provider.ts";
 import type { AcpAgentConfig } from "../src/config.ts";
 
 const fakePath = fileURLToPath(new URL("./fake-agent.mjs", import.meta.url));
@@ -543,7 +543,7 @@ test("failed ACP tool_call_update renders failure mark with tracked title", asyn
 });
 
 test("session/resume reconnects without replay and onSessionCreated fires once for new sessions", async () => {
-	const created: { piSessionId: string; agentId: string; sessionId: string }[] = [];
+	const created: { piSessionId: string; agentId: string; sessionId: string; instructionsHash: string }[] = [];
 	const handle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })], {
 		onSessionCreated: (info) => created.push(info),
 	});
@@ -552,7 +552,7 @@ test("session/resume reconnects without replay and onSessionCreated fires once f
 	await collect(handle.provider.streamSimple(model, userContext("ECHO two"), { sessionId: "pi-1" }));
 	assert.equal(created.length, 1);
 
-	handle.setResumeSession("pi-resumed", "fake", "saved-acp-sess");
+	handle.setResumeSession("pi-resumed", "fake", "saved-acp-sess", created[0]!.instructionsHash);
 	const resumed = (await collect(handle.provider.streamSimple(model, userContext("ECHO resumed"), { sessionId: "pi-resumed" }))).at(-1);
 	assert.ok(resumed?.type === "done");
 	assert.equal(messageText(resumed.message), "resumed");
@@ -563,23 +563,64 @@ test("session/resume reconnects without replay and onSessionCreated fires once f
 test("session/load restores session and ignores replayed history updates", async () => {
 	const handle = makeProvider([fakeAgent({ env: { FAKE_LOAD: "1" } })]);
 	const model = firstModel(handle);
-	handle.setResumeSession("pi-loaded", "fake", "loaded-acp-sess");
+	handle.setResumeSession("pi-loaded", "fake", "loaded-acp-sess", fingerprintInstructions(undefined));
 	const loaded = (await collect(handle.provider.streamSimple(model, userContext("ECHO after-load"), { sessionId: "pi-loaded" }))).at(-1);
 	assert.ok(loaded?.type === "done");
 	assert.equal(messageText(loaded.message), "after-load");
 	handle.dispose();
 });
 
+test("session/resume and session/load resend systemPrompt when supported and match unchanged instructions", async () => {
+	for (const envFlag of ["FAKE_RESUME", "FAKE_LOAD"] as const) {
+		const handle = makeProvider([
+			fakeAgent({ env: { [envFlag]: "1", FAKE_SYSTEM_PROMPT: "1", FAKE_DIRECTIVE: "1" } }),
+		]);
+		const model = firstModel(handle);
+		const instructions = "Follow DIRECTIVE-PROBE strictly.";
+		handle.setResumeSession("pi-sys", "fake", "sys-sess", fingerprintInstructions(instructions));
+		const ctx = normalizeContext({ systemPrompt: instructions, messages: [{ role: "user", content: "hello", timestamp: Date.now() }] });
+		const last = (await collect(handle.provider.streamSimple(model, ctx, { sessionId: "pi-sys" }))).at(-1);
+		assert.ok(last?.type === "done");
+		assert.equal(messageText(last.message), "DIRECTIVE-PROBE acknowledged");
+		handle.dispose();
+	}
+});
+
+test("resuming with changed, missing, or unavailable instructions fails explicitly", async () => {
+	const handle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })]);
+	const model = firstModel(handle);
+
+	// Changed instructions
+	handle.setResumeSession("pi-changed", "fake", "sess-1", fingerprintInstructions("DIRECTIVE-A"));
+	const changedCtx = normalizeContext({ systemPrompt: "DIRECTIVE-B", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
+	const changedErr = (await collect(handle.provider.streamSimple(model, changedCtx, { sessionId: "pi-changed" }))).at(-1);
+	assert.ok(changedErr?.type === "error");
+	assert.match(changedErr.error.errorMessage ?? "", /instructions changed/);
+
+	// Missing fingerprint (legacy entry)
+	handle.setResumeSession("pi-missing-fp", "fake", "sess-1");
+	const missingFpErr = (await collect(handle.provider.streamSimple(model, userContext("hi"), { sessionId: "pi-missing-fp" }))).at(-1);
+	assert.ok(missingFpErr?.type === "error");
+	assert.match(missingFpErr.error.errorMessage ?? "", /missing an instruction fingerprint/);
+
+	// Unavailable instructions (saved with instructions, resumed without)
+	handle.setResumeSession("pi-unavail", "fake", "sess-1", fingerprintInstructions("DIRECTIVE-A"));
+	const unavailErr = (await collect(handle.provider.streamSimple(model, userContext("hi"), { sessionId: "pi-unavail" }))).at(-1);
+	assert.ok(unavailErr?.type === "error");
+	assert.match(unavailErr.error.errorMessage ?? "", /instructions changed/);
+	handle.dispose();
+});
+
 test("resuming an unsupported or missing ACP session surfaces an explicit error", async () => {
 	const unsupported = makeProvider();
-	unsupported.setResumeSession("pi-unsup", "fake", "sess-1");
+	unsupported.setResumeSession("pi-unsup", "fake", "sess-1", fingerprintInstructions(undefined));
 	const err1 = (await collect(unsupported.provider.streamSimple(firstModel(unsupported), userContext("hi"), { sessionId: "pi-unsup" }))).at(-1);
 	assert.ok(err1?.type === "error");
 	assert.match(err1.error.errorMessage ?? "", /does not support resuming or loading/);
 	unsupported.dispose();
 
 	const missing = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })]);
-	missing.setResumeSession("pi-miss", "fake", "missing-session");
+	missing.setResumeSession("pi-miss", "fake", "missing-session", fingerprintInstructions(undefined));
 	const err2 = (await collect(missing.provider.streamSimple(firstModel(missing), userContext("hi"), { sessionId: "pi-miss" }))).at(-1);
 	assert.ok(err2?.type === "error");
 	assert.match(err2.error.errorMessage ?? "", /Session not found/);
