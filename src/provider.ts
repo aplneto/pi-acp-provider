@@ -33,7 +33,7 @@ import {
 	type TranscriptContext,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
+import { getCurrentSystemPrompt, getCurrentTools } from "./transcript.ts";
 import { AcpClient, AcpRpcError, type PromptResult, type ServerRequest } from "./acp-client.ts";
 import { McpBridge, toMcpToolResult } from "./mcp-bridge.ts";
 import { ToolHandoff, type ToolHandoffCall } from "./tool-handoff.ts";

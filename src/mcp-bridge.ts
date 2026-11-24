@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { fileURLToPath } from "node:url";
 import type { Tool, ToolResultMessage } from "@earendil-works/pi-ai";
-import { toToolDeclaration } from "@earendil-works/pi-ai/utils/transcript";
+import { toToolDeclaration } from "./transcript.ts";
 import { isRecord, RPC_INTERNAL_ERROR, RPC_INVALID_PARAMS, RPC_METHOD_NOT_FOUND } from "./acp.ts";
 import type { McpServerConfig } from "./acp-client.ts";
 import type { ToolHandoff } from "./tool-handoff.ts";
