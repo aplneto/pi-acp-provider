@@ -646,6 +646,31 @@ test("resuming with changed or missing instructions warns when systemPrompt is u
 	freshHandle.dispose();
 });
 
+test("onInstructionChange lets the caller choose continue, fresh, or abort", async () => {
+	let choice: "continue" | "fresh" | "abort" = "fresh";
+	const created: string[] = [];
+	const handle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1", FAKE_DIRECTIVE: "1" } })], {
+		onSessionCreated: (info) => created.push(info.sessionId),
+		onInstructionChange: async () => choice,
+	});
+	const model = firstModel(handle);
+	const ctx = normalizeContext({ systemPrompt: "DIRECTIVE-PROBE", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] });
+
+	choice = "fresh";
+	handle.setResumeSession("pi-choice-fresh", "fake", "old-1", fingerprintInstructions("OLD"));
+	const freshRes = (await collect(handle.provider.streamSimple(model, ctx, { sessionId: "pi-choice-fresh" }))).at(-1);
+	assert.ok(freshRes?.type === "done");
+	assert.equal(messageText(freshRes.message), "DIRECTIVE-PROBE acknowledged");
+	assert.equal(created.length, 1);
+
+	choice = "abort";
+	handle.setResumeSession("pi-choice-abort", "fake", "old-2", fingerprintInstructions("OLD"));
+	const abortRes = (await collect(handle.provider.streamSimple(model, ctx, { sessionId: "pi-choice-abort" }))).at(-1);
+	assert.ok(abortRes?.type === "error");
+	assert.match(abortRes.error.errorMessage ?? "", /start a new Pi session/);
+	handle.dispose();
+});
+
 test("resuming an unsupported or missing ACP session surfaces an explicit error", async () => {
 	const unsupported = makeProvider();
 	unsupported.setResumeSession("pi-unsup", "fake", "sess-1", fingerprintInstructions(undefined));

@@ -46,6 +46,22 @@ export default function acpExtension(pi: ExtensionAPI): void {
 		onWarning: (message, sessionId) => {
 			sessionUis.get(sessionId ?? currentSessionId ?? "")?.notify(message, "warning");
 		},
+		onInstructionChange: async ({ agent, message, signal, piSessionId }) => {
+			const ui = sessionUis.get(piSessionId ?? currentSessionId ?? "");
+			if (!ui) return "continue";
+			ui.notify(message, "warning");
+			const continueChoice = "Continue existing session (keep prior instructions)";
+			const freshChoice = "Start a fresh ACP session (apply new instructions)";
+			const abortChoice = "Cancel (start a new Pi session instead)";
+			const chosen = await ui.select(
+				`${agent.name} instructions changed on restore`,
+				[continueChoice, freshChoice, abortChoice],
+				signal ? { signal } : undefined,
+			);
+			if (chosen === freshChoice) return "fresh";
+			if (chosen === continueChoice) return "continue";
+			return "abort";
+		},
 		...(config.autoApproveTools
 			? {}
 			: { permissionPolicy: interactivePolicy((sessionId) => sessionUis.get(sessionId ?? currentSessionId ?? "")) }),

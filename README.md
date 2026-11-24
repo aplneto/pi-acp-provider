@@ -123,10 +123,12 @@ Global keys:
   (ignoring replayed `session/update` history), resending `systemPrompt` in
   `append` mode when advertised. If the agent does not advertise
   `systemCapabilities.systemPrompt` and the instruction fingerprint is missing
-  or changed, the provider emits a warning—and either restores the saved
-  session (`freshSessionOnInstructionChange: false`, default) or starts a fresh
-  ACP session (`freshSessionOnInstructionChange: true`). `/fork` starts a fresh
-  ACP session.
+  or changed, the provider emits a warning. In interactive sessions (when
+  `freshSessionOnInstructionChange` is `false`), it asks whether to continue the
+  existing session, start a fresh ACP session with the new instructions, or
+  cancel to start a new Pi session; in non-interactive sessions it warns and
+  continues (`freshSessionOnInstructionChange: true` always warns and starts a
+  fresh ACP session). `/fork` starts a fresh ACP session.
 - **Instructions**: Pi's current system instructions are sent when the ACP
   session starts. Agents advertising `sessionCapabilities.systemPrompt` receive
   them in `append` mode. Otherwise they are prepended to the first user prompt;

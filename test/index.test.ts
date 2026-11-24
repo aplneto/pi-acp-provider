@@ -259,12 +259,16 @@ test("extension persists acp-session entries and restores on resume", () =>
 			assert.equal(entries.length, 1, "resumed session does not append a duplicate acp-session entry");
 
 			const legacyWarnings: { msg: string; level: string }[] = [];
+			let selectCalls = 0;
 			const legacyCtx = {
 				cwd: "/tmp",
 				hasUI: true,
 				ui: {
 					notify: (msg: string, level: string) => legacyWarnings.push({ msg, level }),
-					select: async () => "Allow",
+					select: async () => {
+						selectCalls++;
+						return "Continue existing session (keep prior instructions)";
+					},
 				},
 				sessionManager: {
 					getSessionId: () => "pi-legacy",
@@ -280,6 +284,7 @@ test("extension persists acp-session entries and restores on resume", () =>
 			assert.equal(legacyRes.stopReason, "stop");
 			assert.equal(legacyWarnings.length, 1);
 			assert.equal(legacyWarnings[0]?.level, "warning");
+			assert.equal(selectCalls, 1);
 
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, startCtx);
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, resumeCtx);

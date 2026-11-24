@@ -129,6 +129,8 @@ export function fingerprintInstructions(instructions: string | undefined): strin
 	return createHash("sha256").update(instructions ?? "").digest("hex");
 }
 
+export type InstructionChangeAction = "continue" | "fresh" | "abort";
+
 export interface AcpProviderOptions {
 	config: AcpProviderConfig;
 	/** Defaults to auto-approval. */
@@ -143,6 +145,13 @@ export interface AcpProviderOptions {
 	}) => void;
 	/** Called when a non-fatal warning should be surfaced to the Pi session. */
 	onWarning?: (message: string, piSessionId?: string) => void;
+	/** Called on restore when an agent without `systemPrompt` support has missing/changed instructions. */
+	onInstructionChange?: (context: {
+		agent: AcpAgentConfig;
+		message: string;
+		signal: AbortSignal | undefined;
+		piSessionId: string | undefined;
+	}) => Promise<InstructionChangeAction>;
 	log?: ((message: string) => void) | undefined;
 }
 
@@ -581,7 +590,14 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 						} else {
 							const msg = `${reason}; ${agent.name} does not support updating system instructions on restore, so prior instructions may remain active.`;
 							log?.(msg);
-							options.onWarning?.(msg, piSessionId);
+							const action = options.onInstructionChange
+								? await options.onInstructionChange({ agent, message: msg, signal, piSessionId })
+								: (options.onWarning?.(msg, piSessionId), "continue");
+							if (action === "fresh") {
+								resumeSessionId = undefined;
+							} else if (action === "abort") {
+								throw new Error("ACP session instructions changed; start a new Pi session to apply them.");
+							}
 						}
 					}
 				}
