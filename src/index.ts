@@ -40,6 +40,9 @@ export default function acpExtension(pi: ExtensionAPI): void {
 	const handle = createAcpProvider({
 		config,
 		log,
+		onSessionCreated: ({ agentId, sessionId, cwd }) => {
+			pi.appendEntry("acp-session", { agentId, sessionId, cwd });
+		},
 		...(config.autoApproveTools
 			? {}
 			: { permissionPolicy: interactivePolicy((sessionId) => sessionUis.get(sessionId ?? currentSessionId ?? "")) }),
@@ -88,6 +91,26 @@ export default function acpExtension(pi: ExtensionAPI): void {
 		const sessionId = ctx.sessionManager.getSessionId();
 		currentSessionId = sessionId;
 		handle.resetSession(ctx.cwd, sessionId);
+		if (event.reason === "startup" || event.reason === "resume") {
+			const branch = (ctx.sessionManager as { getBranch?: () => unknown[] }).getBranch?.() ?? [];
+			for (const entry of branch) {
+				if (
+					typeof entry === "object" &&
+					entry !== null &&
+					(entry as { type?: unknown }).type === "custom" &&
+					(entry as { customType?: unknown }).customType === "acp-session"
+				) {
+					const data = (entry as { data?: { agentId?: unknown; sessionId?: unknown; cwd?: unknown } }).data;
+					if (
+						typeof data?.agentId === "string" &&
+						typeof data.sessionId === "string" &&
+						(data.cwd === undefined || data.cwd === ctx.cwd)
+					) {
+						handle.setResumeSession(sessionId, data.agentId, data.sessionId);
+					}
+				}
+			}
+		}
 		if (ctx.hasUI) sessionUis.set(sessionId, ctx.ui);
 		else sessionUis.delete(sessionId);
 		if (event.reason === "startup" && config.agents.length === 0 && ctx.hasUI) {

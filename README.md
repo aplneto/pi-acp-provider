@@ -154,9 +154,11 @@ Global keys:
   OAuth session had expired. Codex ACP and Antigravity passed live directive
   probes, using system-prompt and first-user-message delivery respectively.
 - No image input (prompts are sent as text only).
-- `/resume` and `/fork` start a fresh ACP session. Prior Pi history is not
-  replayed to the agent, and switching models mid-conversation does not carry
-  history across agents.
+- `/resume` and `--continue` / `--session` restore the branch's saved ACP session
+  via capability-negotiated `session/resume` (without replay) or `session/load`
+  (ignoring replayed history updates) when the agent supports them. `/fork`
+  starts a fresh ACP session, and switching models mid-conversation does not
+  carry history across agents.
 - ACP processes use the provider extension's session working directory. Pi's
   provider stream does not expose a child session's working directory, so a
   subagent started in a different directory or worktree must not be assumed to

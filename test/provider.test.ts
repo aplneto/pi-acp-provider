@@ -542,6 +542,50 @@ test("failed ACP tool_call_update renders failure mark with tracked title", asyn
 	handle.dispose();
 });
 
+test("session/resume reconnects without replay and onSessionCreated fires once for new sessions", async () => {
+	const created: { piSessionId: string; agentId: string; sessionId: string }[] = [];
+	const handle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })], {
+		onSessionCreated: (info) => created.push(info),
+	});
+	const model = firstModel(handle);
+	await collect(handle.provider.streamSimple(model, userContext("ECHO one"), { sessionId: "pi-1" }));
+	await collect(handle.provider.streamSimple(model, userContext("ECHO two"), { sessionId: "pi-1" }));
+	assert.equal(created.length, 1);
+
+	handle.setResumeSession("pi-resumed", "fake", "saved-acp-sess");
+	const resumed = (await collect(handle.provider.streamSimple(model, userContext("ECHO resumed"), { sessionId: "pi-resumed" }))).at(-1);
+	assert.ok(resumed?.type === "done");
+	assert.equal(messageText(resumed.message), "resumed");
+	assert.equal(created.length, 1, "restoring a session must not emit onSessionCreated");
+	handle.dispose();
+});
+
+test("session/load restores session and ignores replayed history updates", async () => {
+	const handle = makeProvider([fakeAgent({ env: { FAKE_LOAD: "1" } })]);
+	const model = firstModel(handle);
+	handle.setResumeSession("pi-loaded", "fake", "loaded-acp-sess");
+	const loaded = (await collect(handle.provider.streamSimple(model, userContext("ECHO after-load"), { sessionId: "pi-loaded" }))).at(-1);
+	assert.ok(loaded?.type === "done");
+	assert.equal(messageText(loaded.message), "after-load");
+	handle.dispose();
+});
+
+test("resuming an unsupported or missing ACP session surfaces an explicit error", async () => {
+	const unsupported = makeProvider();
+	unsupported.setResumeSession("pi-unsup", "fake", "sess-1");
+	const err1 = (await collect(unsupported.provider.streamSimple(firstModel(unsupported), userContext("hi"), { sessionId: "pi-unsup" }))).at(-1);
+	assert.ok(err1?.type === "error");
+	assert.match(err1.error.errorMessage ?? "", /does not support resuming or loading/);
+	unsupported.dispose();
+
+	const missing = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })]);
+	missing.setResumeSession("pi-miss", "fake", "missing-session");
+	const err2 = (await collect(missing.provider.streamSimple(firstModel(missing), userContext("hi"), { sessionId: "pi-miss" }))).at(-1);
+	assert.ok(err2?.type === "error");
+	assert.match(err2.error.errorMessage ?? "", /Session not found/);
+	missing.dispose();
+});
+
 test("streamOptions.cwd overrides the session cwd for identified and transient calls", async () => {
 	const root = mkdtempSync(join(tmpdir(), "pi-acp-stream-cwd-"));
 	const dirA = join(root, "a");

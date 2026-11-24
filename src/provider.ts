@@ -128,6 +128,8 @@ export interface AcpProviderOptions {
 	config: AcpProviderConfig;
 	/** Defaults to auto-approval. */
 	permissionPolicy?: PermissionPolicy;
+	/** Called when a brand-new ACP session is created for a Pi session. */
+	onSessionCreated?: (info: { piSessionId: string; agentId: string; sessionId: string; cwd: string }) => void;
 	log?: ((message: string) => void) | undefined;
 }
 
@@ -135,6 +137,8 @@ export interface AcpProviderHandle {
 	provider: Provider;
 	/** Starts fresh ACP sessions in `cwd` on the next prompt (a new Pi session). */
 	resetSession(cwd: string, sessionId?: string): void;
+	/** Registers an ACP session ID to restore via `session/resume` or `session/load` on first turn. */
+	setResumeSession(piSessionId: string, agentId: string, acpSessionId: string): void;
 	/** Disposes ACP clients and state owned by `sessionId`, leaving other sessions intact. */
 	disposeSession(sessionId: string): void;
 	/** Id of the agent that serves `modelId` (`<agent id>` or `<agent id>/<model id>`), if any. */
@@ -312,6 +316,8 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 	const sessionClients = new Map<string, Map<string, AcpClient>>();
 	const sessionCwds = new Map<string, string>();
 	const sessionBridges = new Map<string, McpBridge>();
+	const pendingResumes = new Map<string, Map<string, string>>();
+	const knownSessions = new Set<string>();
 	const pendingTurns = new Map<string, PendingTurn>();
 	const activeClients = new Set<AcpClient>();
 	let unregisterCleanup: (() => void) | undefined;
@@ -327,6 +333,10 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 		if (bridge) {
 			sessionBridges.delete(sessionId);
 			bridge.close();
+		}
+		pendingResumes.delete(sessionId);
+		for (const key of knownSessions) {
+			if (key.startsWith(`${sessionId}:`)) knownSessions.delete(key);
 		}
 		sessionCwds.delete(sessionId);
 		const ended = sessionClients.get(sessionId);
@@ -538,9 +548,25 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 
 			// Setup failures (spawn, handshake, session) end the stream before `start`.
 			let sessionId: string;
+			const resumeSessionId = piSessionId ? pendingResumes.get(piSessionId)?.get(agent.id) : undefined;
 			try {
 				const mcpServers = bridge ? [await bridge.serverConfig()] : undefined;
-				sessionId = await acp.ensureSession({ signal, instructions, mcpServers });
+				sessionId = await acp.ensureSession({ signal, instructions, mcpServers, resumeSessionId });
+				if (piSessionId) {
+					if (resumeSessionId) pendingResumes.get(piSessionId)?.delete(agent.id);
+					const sessionKey = `${piSessionId}:${agent.id}:${sessionId}`;
+					if (!knownSessions.has(sessionKey)) {
+						knownSessions.add(sessionKey);
+						if (!resumeSessionId) {
+							options.onSessionCreated?.({
+								piSessionId,
+								agentId: agent.id,
+								sessionId,
+								cwd: requestCwd ?? sessionCwds.get(piSessionId) ?? cwd,
+							});
+						}
+					}
+				}
 				await applySettings(acp, agent, sessionId, target.modelId, model, streamOptions);
 			} catch (error) {
 				abortedOrError(error);
@@ -705,6 +731,11 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			cwd = nextCwd;
 			for (const client of clients.values()) client.resetSession(nextCwd);
 		},
+		setResumeSession(piSessionId: string, agentId: string, acpSessionId: string): void {
+			const map = pendingResumes.get(piSessionId) ?? new Map<string, string>();
+			map.set(agentId, acpSessionId);
+			pendingResumes.set(piSessionId, map);
+		},
 		disposeSession,
 		agentFor: (modelId) => parseModelId(modelId, agents)?.agent.id,
 		commands: async (agentId, sessionId) => {
@@ -716,6 +747,8 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 			pendingTurns.clear();
 			for (const bridge of sessionBridges.values()) bridge.close();
 			sessionBridges.clear();
+			pendingResumes.clear();
+			knownSessions.clear();
 			for (const client of clients.values()) client.dispose();
 			clients.clear();
 			for (const owned of sessionClients.values()) for (const client of owned.values()) client.dispose();

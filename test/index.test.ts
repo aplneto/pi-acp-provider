@@ -21,17 +21,19 @@ function makeFakePi() {
 	const commands = new Map<string, FakeCommand>();
 	const sent: string[] = [];
 	const models: unknown[] = [];
+	const entries: { customType: string; data: unknown }[] = [];
 	const pi = {
 		registerProvider: (provider: unknown) => providers.push(provider),
 		registerCommand: (name: string, options: FakeCommand) => commands.set(name, options),
 		sendUserMessage: (text: string) => sent.push(text),
+		appendEntry: (customType: string, data: unknown) => entries.push({ customType, data }),
 		setModel: async (model: unknown) => models.push(model) > 0,
 		on: (event: string, handler: EventHandler) => {
 			handlers.set(event, handler);
 			return () => {};
 		},
 	};
-	return { pi: pi as unknown as ExtensionAPI, providers, handlers, commands, sent, models };
+	return { pi: pi as unknown as ExtensionAPI, providers, handlers, commands, sent, models, entries };
 }
 
 /** Runs `fn` with Pi's agent dir pointing at a temp dir holding the given settings.json. */
@@ -210,5 +212,42 @@ test("interactive and background sessions enforce explicit permissions by defaul
 
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, interactiveCtx);
 			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, backgroundCtx);
+		},
+	));
+
+test("extension persists acp-session entries and restores on resume", () =>
+	withSettings(
+		{ acp: { agents: { fake: { command: process.execPath, args: [fileURLToPath(new URL("./fake-agent.mjs", import.meta.url))], env: { FAKE_RESUME: "1" } } } } },
+		async () => {
+			const { pi, providers, handlers, entries } = makeFakePi();
+			acpExtension(pi);
+			const provider = providers[0] as {
+				getModels: () => { id: string }[];
+				streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<{ stopReason: string; content: { type: string; text: string }[] }> };
+			};
+			const { normalizeContext } = await import("@earendil-works/pi-ai/utils/transcript");
+			const model = provider.getModels()[0];
+			const startCtx = { cwd: "/tmp", hasUI: false, sessionManager: { getSessionId: () => "pi-s1", getBranch: () => [] } };
+			handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, startCtx);
+			await provider.streamSimple(model, normalizeContext({ messages: [{ role: "user", content: "ECHO first", timestamp: Date.now() }] }), { sessionId: "pi-s1" }).result();
+			assert.equal(entries.length, 1);
+			assert.equal(entries[0]?.customType, "acp-session");
+
+			const resumeCtx = {
+				cwd: "/tmp",
+				hasUI: false,
+				sessionManager: {
+					getSessionId: () => "pi-s2",
+					getBranch: () => [{ type: "custom", customType: entries[0]!.customType, data: entries[0]!.data }],
+				},
+			};
+			handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, resumeCtx);
+			const resumed = await provider.streamSimple(model, normalizeContext({ messages: [{ role: "user", content: "ECHO second", timestamp: Date.now() }] }), { sessionId: "pi-s2" }).result();
+			assert.equal(resumed.stopReason, "stop");
+			assert.equal(resumed.content.map((b) => b.text).join(""), "second");
+			assert.equal(entries.length, 1, "resumed session does not append a duplicate acp-session entry");
+
+			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, startCtx);
+			handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, resumeCtx);
 		},
 	));

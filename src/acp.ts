@@ -221,6 +221,10 @@ export interface AcpAgentInfo {
 	authMethods: AcpAuthMethod[];
 	/** Whether the agent advertises client-provided session system prompts. */
 	supportsSystemPrompt: boolean;
+	/** Whether the agent advertises `session/resume` (reconnect without replay). */
+	supportsResumeSession: boolean;
+	/** Whether the agent advertises `session/load` (reload with history replay). */
+	supportsLoadSession: boolean;
 }
 
 function parseAuthMethods(value: unknown): AcpAuthMethod[] {
@@ -243,6 +247,8 @@ export function parseInitializeResult(result: unknown): AcpAgentInfo {
 		version: optionalString(info.version) ?? "0.0.0",
 		authMethods: parseAuthMethods(record.authMethods),
 		supportsSystemPrompt: isRecord(sessionCapabilities.systemPrompt),
+		supportsResumeSession: isRecord(sessionCapabilities.resume),
+		supportsLoadSession: capabilities.loadSession === true || isRecord(sessionCapabilities.load),
 	};
 }
 
@@ -338,6 +344,15 @@ export function parseNewSessionResult(result: unknown): { sessionId: string; con
 		throw new Error("session/new did not return a sessionId");
 	}
 	return { sessionId: result.sessionId, config: parseSessionConfig(result) };
+}
+
+export function parseRestoredSessionResult(
+	result: unknown,
+	fallbackSessionId: string,
+): { sessionId: string; config: AcpSessionConfig } {
+	const record = isRecord(result) ? result : {};
+	const sessionId = typeof record.sessionId === "string" && record.sessionId.length > 0 ? record.sessionId : fallbackSessionId;
+	return { sessionId, config: parseSessionConfig(result) };
 }
 
 const STOP_REASONS = ["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"] as const;

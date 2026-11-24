@@ -22,6 +22,7 @@ import {
 	parseConfigOptionUpdate,
 	parseInitializeResult,
 	parseNewSessionResult,
+	parseRestoredSessionResult,
 	parseRpcMessage,
 	parseSessionConfig,
 	parseSessionUpdate,
@@ -126,6 +127,8 @@ export interface EnsureSessionOptions {
 	signal?: AbortSignal | undefined;
 	instructions?: string | undefined;
 	mcpServers?: McpServerConfig[] | undefined;
+	/** Existing ACP session ID to restore via `session/resume` or `session/load`. */
+	resumeSessionId?: string | undefined;
 	/**
 	 * Whether `auth_required` may trigger the configured `authenticate` method.
 	 * Background work turns it off, since a method may wait on a browser login.
@@ -250,8 +253,14 @@ export class AcpClient {
 		return abortable(this.ready, signal);
 	}
 
-	/** Returns the current ACP session, creating one (and the process) on demand. */
-	async ensureSession({ signal, authenticate = true, instructions, mcpServers }: EnsureSessionOptions = {}): Promise<string> {
+	/** Returns the current ACP session, creating or restoring one (and the process) on demand. */
+	async ensureSession({
+		signal,
+		authenticate = true,
+		instructions,
+		mcpServers,
+		resumeSessionId,
+	}: EnsureSessionOptions = {}): Promise<string> {
 		await this.ensureReady(signal);
 		const conn = this.conn;
 		if (!conn) throw new Error(`${this.options.agent.name} is not running`);
@@ -260,10 +269,15 @@ export class AcpClient {
 			conn.session = null;
 		}
 		conn.sessionInstructions = instructions;
-		conn.session ??= this.newSession(conn, authenticate, instructions, mcpServers).catch((error: unknown) => {
-			conn.session = null;
-			throw error;
-		});
+		if (!conn.session) {
+			const startSession = resumeSessionId
+				? this.restoreSession(conn, resumeSessionId, authenticate, mcpServers)
+				: this.newSession(conn, authenticate, instructions, mcpServers);
+			conn.session = startSession.catch((error: unknown) => {
+				conn.session = null;
+				throw error;
+			});
+		}
 		return abortable(conn.session, signal);
 	}
 
@@ -387,6 +401,46 @@ export class AcpClient {
 			// No timeout: methods may wait on an interactive login (e.g. a browser).
 			await this.request("authenticate", { methodId: authMethod });
 			return create();
+		}
+	}
+
+	/** `session/resume` or `session/load`, authenticating once if the agent asks. */
+	private async restoreSession(
+		conn: Connection,
+		resumeSessionId: string,
+		authenticate: boolean,
+		mcpServers?: McpServerConfig[],
+	): Promise<string> {
+		const method = this.agentInfo?.supportsResumeSession
+			? "session/resume"
+			: this.agentInfo?.supportsLoadSession
+				? "session/load"
+				: null;
+		if (!method) {
+			throw new Error(`${this.options.agent.name} does not support resuming or loading ACP sessions.`);
+		}
+		const restore = async () => {
+			const { sessionId, config } = parseRestoredSessionResult(
+				await this.request(
+					method,
+					{ sessionId: resumeSessionId, cwd: this.cwd, mcpServers: mcpServers ?? [] },
+					this.options.handshakeTimeoutMs,
+				),
+				resumeSessionId,
+			);
+			conn.sessionUsed = true;
+			conn.sessions.set(sessionId, { config, initialModel: config.model?.currentValue });
+			return sessionId;
+		};
+		try {
+			return await restore();
+		} catch (error) {
+			const { authMethod } = this.options.agent;
+			const authRequired = error instanceof AcpRpcError && error.code === ACP_AUTH_REQUIRED;
+			if (!authRequired || !authMethod || !authenticate) throw error;
+			this.log(`authenticating with method '${authMethod}'`);
+			await this.request("authenticate", { methodId: authMethod });
+			return restore();
 		}
 	}
 

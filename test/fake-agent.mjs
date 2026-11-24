@@ -267,7 +267,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 		case "initialize":
 			reply(message.id, {
 				protocolVersion: Number(process.env.FAKE_PROTOCOL ?? 1),
-				agentCapabilities: { loadSession: false, ...(process.env.FAKE_SYSTEM_PROMPT === "1" ? { sessionCapabilities: { systemPrompt: {} } } : {}) },
+				agentCapabilities: {
+					loadSession: process.env.FAKE_LOAD === "1",
+					sessionCapabilities: {
+						...(process.env.FAKE_SYSTEM_PROMPT === "1" ? { systemPrompt: {} } : {}),
+						...(process.env.FAKE_RESUME === "1" ? { resume: {} } : {}),
+					},
+				},
 				agentInfo: { name: `fake-agent-${process.pid}`, version: "0.0.1" },
 				authMethods: [{ id: "fake-login", name: "Fake login", description: "Pretend to sign in" }],
 			});
@@ -296,6 +302,27 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 						{ name: "session", description: "Session tools", input: { hint: "info | rename" } },
 					],
 				});
+			}
+			break;
+		case "session/resume":
+			if (process.env.FAKE_RESUME !== "1") {
+				replyError(message.id, -32601, "Method not found");
+			} else if (message.params?.sessionId === "missing-session") {
+				replyError(message.id, -32603, "Session not found");
+			} else {
+				const sessionId = message.params.sessionId;
+				reply(message.id, { sessionId, ...sessionExtras() });
+			}
+			break;
+		case "session/load":
+			if (process.env.FAKE_LOAD !== "1") {
+				replyError(message.id, -32601, "Method not found");
+			} else if (message.params?.sessionId === "missing-session") {
+				replyError(message.id, -32603, "Session not found");
+			} else {
+				const sessionId = message.params.sessionId;
+				update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "REPLAYED_HISTORY " } });
+				reply(message.id, { ...sessionExtras() });
 			}
 			break;
 		case "session/set_config_option": {
