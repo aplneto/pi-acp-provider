@@ -48,7 +48,7 @@ export default function acpExtension(pi: ExtensionAPI): void {
 		},
 		onInstructionChange: async ({ agent, message, signal, piSessionId }) => {
 			const ui = sessionUis.get(piSessionId ?? currentSessionId ?? "");
-			if (!ui) return "continue";
+			if (!ui) return "abort";
 			ui.notify(message, "warning");
 			const continueChoice = "Continue existing session (keep prior instructions)";
 			const freshChoice = "Start a fresh ACP session (apply new instructions)";

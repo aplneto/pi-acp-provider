@@ -97,7 +97,7 @@ Global keys:
 | Key | Env override | Default | Meaning |
 |---|---|---|---|
 | `autoApproveTools` | `ACP_AUTO_APPROVE` | `false` | When `false` (default), each permission request opens a select dialog (TUI/RPC) or is denied (background/print/JSON mode). Set `true` to auto-approve (`allow_once`). |
-| `freshSessionOnInstructionChange` | | `"ask"` | Restore behavior when instructions changed (or lack a fingerprint) on an agent without `systemPrompt` support: `"ask"` (prompt interactively, or warn & continue in background), `"continue"` (warn & keep existing session), `"fresh"`/`true` (warn & start a fresh ACP session), or `"restart"` (warn, kill agent process, and start a new one). |
+| `freshSessionOnInstructionChange` | | `"ask"` | Restore behavior when instructions changed (or lack a fingerprint) on an agent without `systemPrompt` support: `"ask"` (prompt interactively, or return an error without a UI), `"continue"` (warn & keep existing session), `"fresh"`/`true` (warn & start a fresh ACP session), or `"restart"` (warn, kill agent process, and start a new one). |
 | `handshakeTimeoutMs` | | `30000` | Milliseconds to wait for `initialize`, `session/new`, `session/resume`, `session/load`, and model or thinking-level changes. |
 | | `ACP_DEBUG=1` | off | Wire diagnostics on stderr. |
 
@@ -122,20 +122,25 @@ Global keys:
   `session/resume` (preferred, without history replay) or `session/load`
   (ignoring replayed `session/update` history), resending `systemPrompt` in
   `append` mode when advertised. If the agent does not advertise
-  `systemCapabilities.systemPrompt` and the instruction fingerprint is missing
-  or changed, the provider emits a warning and follows
+  `sessionCapabilities.systemPrompt` and the instruction fingerprint is missing
+  or changed, the provider follows
   `freshSessionOnInstructionChange` (`"ask"` by default: prompts to continue,
-  start a fresh ACP session, restart the agent process, or cancel to start a
-  new Pi session; `"continue"` warns and keeps the saved session; `"fresh"` /
-  `true` warns and starts a fresh ACP session; `"restart"` warns, kills the
-  agent process, and starts a new one). `/fork` starts a fresh ACP session.
+  start a fresh ACP session, restart the agent process, or cancel; without an
+  interactive UI it returns an error). `"continue"` keeps the saved session;
+  `"fresh"` / `true` starts a fresh ACP session; `"restart"` kills the ACP
+  process and starts a new one. A fresh ACP session does not retain the old
+  ACP conversation. `/fork` starts a fresh ACP session.
 - **Instructions**: Pi's current system instructions are sent when the ACP
   session starts. Agents advertising `sessionCapabilities.systemPrompt` receive
   them in `append` mode. Otherwise they are prepended to the first user prompt;
   that fallback has user-message semantics and does not guarantee system-level
-  precedence. Instructions are not repeated on follow-up turns or restored
-  sessions. If they change during a used session, the provider reports an error
-  and requires a new Pi session.
+  precedence. Instructions are not repeated on follow-up turns. If they change
+  during a live session, the provider reports an error and requires a new Pi
+  session. On restore, agents that advertise system-prompt support receive the
+  current instructions, but may defer applying changes. In a live Codex ACP
+  2.9.0 test, the restored session recalled its earlier context while still
+  following the old directive on the next turn. Start a fresh session when new
+  directives must apply immediately.
 - **Pi tool bridge (`McpBridge`)**: when the Pi session has tools, the provider
   starts a session-scoped, bearer-authenticated local HTTP MCP server paired with
   a stdio shim (`src/mcp-stdio-shim.mjs`) and passes it in `mcpServers`. When
@@ -170,11 +175,19 @@ Global keys:
 
 ### Adapter notes & known limitations
 
+The following integration versions have been exercised with this fork:
+
+- Pi **1.6.0** and `@tintinweb/pi-subagents` **0.26.2** in live subagent
+  tests; the repository's installed Pi SDK **1.3.0** is used by the test suite.
+- Antigravity and Codex adapter versions and their observed coverage are listed
+  below. Claude ACP was checked at initialization only; an authenticated turn
+  and restoration test remain pending.
+
 | Adapter | System prompt | `McpBridge` (`mcp_pi_*`) | `session/resume` / `load` | Disable built-in tools |
 |---|---|---|---|---|
 | **Antigravity** (`agy acp` 1.5.15) | First-user-message fallback | Verified live | Verified live (`session/resume`) | Not supported by adapter |
-| **Codex** (`@agentclientprotocol/codex-acp` 2.9.0) | Native `append` mode | Verified live | Advertised (`resume` & `load`) | Not supported by adapter |
-| **Claude** (`claude-agent-acp`) | Pending reauth | Pending reauth | Pending reauth | — |
+| **Codex** (`@agentclientprotocol/codex-acp` 2.9.0) | Native `append` mode | Verified live | Resume verified live; load advertised | Not supported by adapter |
+| **Claude** (`@agentclientprotocol/claude-agent-acp` 0.109.1-preview.10) | Advertised; live turn pending reauth | Pending reauth | Advertised; live restore pending reauth | — |
 
 - **Cross-directory & worktree subagents**: Pi's `StreamOptions` does not yet
   include the active session's `cwd`, and shared `ModelRuntime` registrations

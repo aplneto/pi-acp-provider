@@ -589,7 +589,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 							log?.(msg);
 							action = options.onInstructionChange
 								? await options.onInstructionChange({ agent, message: msg, signal, piSessionId })
-								: (options.onWarning?.(msg, piSessionId), "continue");
+								: "abort";
 						} else {
 							action = mode;
 							const detail =
@@ -614,7 +614,7 @@ export function createAcpProvider(options: AcpProviderOptions): AcpProviderHandl
 								: getClient(agent, piSessionId, requestCwd);
 							activeClients.add(acp);
 						} else if (action === "abort") {
-							throw new Error("ACP session instructions changed; start a new Pi session to apply them.");
+							throw new Error(`${reason}; cannot safely restore ${agent.name} without a decision. Start a new Pi session, or configure freshSessionOnInstructionChange explicitly.`);
 						}
 					}
 				}

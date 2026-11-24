@@ -604,6 +604,7 @@ test("resuming with changed or missing instructions warns when systemPrompt is u
 	const warnings: string[] = [];
 	const created: string[] = [];
 	const warnHandle = makeProvider([fakeAgent({ env: { FAKE_RESUME: "1" } })], {
+		freshSessionOnInstructionChange: "continue",
 		onWarning: (msg) => warnings.push(msg),
 		onSessionCreated: (info) => created.push(info.sessionId),
 	});
@@ -692,7 +693,7 @@ test("onInstructionChange lets the caller choose continue, fresh, restart, or ab
 	handle.setResumeSession("pi-choice-abort", "fake", "old-3", fingerprintInstructions("OLD"));
 	const abortRes = (await collect(handle.provider.streamSimple(model, ctx, { sessionId: "pi-choice-abort" }))).at(-1);
 	assert.ok(abortRes?.type === "error");
-	assert.match(abortRes.error.errorMessage ?? "", /start a new Pi session/);
+	assert.match(abortRes.error.errorMessage ?? "", /Start a new Pi session/);
 	handle.dispose();
 });
 

@@ -215,6 +215,40 @@ test("interactive and background sessions enforce explicit permissions by defaul
 		},
 	));
 
+test("background restore rejects changed or unverifiable instructions by default", () =>
+	withSettings(
+		{ acp: { agents: { fake: { command: process.execPath, args: [fileURLToPath(new URL("./fake-agent.mjs", import.meta.url))], env: { FAKE_RESUME: "1" } } } } },
+		async () => {
+			const { pi, providers, handlers } = makeFakePi();
+			acpExtension(pi);
+			const provider = providers[0] as {
+				getModels: () => { id: string }[];
+				streamSimple: (model: unknown, context: unknown, options: unknown) => { result: () => Promise<{ stopReason: string; errorMessage?: string }> };
+			};
+			const { normalizeContext } = await import("@earendil-works/pi-ai/utils/transcript");
+			const { fingerprintInstructions } = await import("../src/provider.ts");
+			const prompt = normalizeContext({ systemPrompt: "new instructions", messages: [{ role: "user", content: "ECHO hello", timestamp: Date.now() }] });
+			for (const [id, hash, reason] of [
+				["changed", fingerprintInstructions("old instructions"), /instructions changed/],
+				["missing", undefined, /no instruction fingerprint/],
+			] as const) {
+				const ctx = {
+					cwd: "/tmp", hasUI: false,
+					sessionManager: {
+						getSessionId: () => id,
+						getBranch: () => [{ type: "custom", customType: "acp-session", data: { agentId: "fake", sessionId: "saved", cwd: "/tmp", instructionsHash: hash } }],
+					},
+				};
+				handlers.get("session_start")?.({ type: "session_start", reason: "resume" }, ctx);
+				const result = await provider.streamSimple(provider.getModels()[0], prompt, { sessionId: id }).result();
+				assert.equal(result.stopReason, "error");
+				assert.match(result.errorMessage ?? "", reason);
+				assert.match(result.errorMessage ?? "", /Start a new Pi session/);
+				handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, ctx);
+			}
+		},
+	));
+
 test("extension persists acp-session entries and restores on resume", () =>
 	withSettings(
 		{ acp: { agents: { fake: { command: process.execPath, args: [fileURLToPath(new URL("./fake-agent.mjs", import.meta.url))], env: { FAKE_RESUME: "1" } } } } },
